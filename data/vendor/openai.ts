@@ -131,6 +131,10 @@ const vendor: VendorConfig = {
     { name: "GPT-5.1", modelName: "gpt-5.1", type: "text", think: false },
     { name: "GPT-5.2", modelName: "gpt-5.2", type: "text", think: false },
     { name: "GPT-5.4", modelName: "gpt-5.4", type: "text", think: false },
+    { name: "GPT-Image-2", modelName: "gpt-image-2", type: "image", mode: ["text", "singleImage"] },
+    { name: "GPT-Image-1.5", modelName: "gpt-image-1.5", type: "image", mode: ["text", "singleImage"] },
+    { name: "DALL-E-3", modelName: "dall-e-3", type: "image", mode: ["text"] },
+    { name: "DALL-E-2", modelName: "dall-e-2", type: "image", mode: ["text"] },
   ],
 };
 // ============================================================
@@ -142,7 +146,81 @@ const textRequest = (model: TextModel, think: boolean, thinkLevel: 0 | 1 | 2 | 3
   return createOpenAI({ baseURL: vendor.inputValues.baseUrl, apiKey }).chat(model.modelName);
 };
 const imageRequest = async (config: ImageConfig, model: ImageModel): Promise<string> => {
-  return "";
+  if (!vendor.inputValues.apiKey) throw new Error("缺少 API Key");
+  const baseUrl = (vendor.inputValues.baseUrl || "https://api.openai.com/v1").replace(/\/+$/, "");
+  const apiKey = vendor.inputValues.apiKey.replace(/^Bearer\s+/i, "");
+
+  const url = baseUrl.endsWith("/v1") ? `${baseUrl}/images/generations` : `${baseUrl}/v1/images/generations`;
+
+  const requestBody: Record<string, any> = {
+    model: model.modelName,
+    prompt: config.prompt,
+    n: 1,
+  };
+
+  // 尺寸与比例映射
+  if (config.aspectRatio) {
+    const sizeMap: Record<string, string> = {
+      "1:1": "1024x1024",
+      "16:9": "1792x1024",
+      "9:16": "1024x1792",
+      "4:3": "1024x768",
+      "3:4": "768x1024",
+    };
+    if (sizeMap[config.aspectRatio]) {
+      requestBody.size = sizeMap[config.aspectRatio];
+    }
+  }
+
+  // 处理参考图（图生图）
+  const imageBase64List = (config.referenceList ?? []).map((r: any) => r.base64).filter(Boolean);
+  if (imageBase64List.length > 0) {
+    requestBody.image = imageBase64List[0];
+    requestBody.images = imageBase64List;
+  }
+
+  logger(`[OpenAI] 开始请求生图，模型: ${model.modelName}`);
+
+  let res: any;
+  try {
+    res = await axios.post(url, requestBody, {
+      headers: {
+        Authorization: `Bearer ${apiKey}`,
+        "Content-Type": "application/json",
+      },
+      timeout: 180000,
+    });
+  } catch (err: any) {
+    const errData = err.response?.data;
+    const msg =
+      errData?.error?.message ||
+      errData?.error ||
+      errData?.message ||
+      errData?.msg ||
+      err.message ||
+      "生图接口请求失败";
+    logger(`[OpenAI] 生图失败: ${JSON.stringify(msg)}`);
+    throw new Error(`OpenAI生图失败: ${typeof msg === "object" ? JSON.stringify(msg) : msg}`);
+  }
+
+  const dataList = res.data?.data;
+  if (!Array.isArray(dataList) || dataList.length === 0) {
+    const errorMsg = res.data?.error?.message || res.data?.msg || JSON.stringify(res.data);
+    throw new Error(`OpenAI生图未返回图片数据: ${errorMsg}`);
+  }
+
+  const item = dataList[0];
+  if (item.b64_json) {
+    if (item.b64_json.startsWith("data:")) {
+      return item.b64_json;
+    }
+    return `data:image/jpeg;base64,${item.b64_json}`;
+  }
+  if (item.url) {
+    return item.url;
+  }
+
+  throw new Error("未能从生图响应中解析出 b64_json 或 url");
 };
 const videoRequest = async (config: VideoConfig, model: VideoModel): Promise<string> => {
   return "";
