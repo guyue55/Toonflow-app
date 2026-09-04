@@ -57,6 +57,54 @@ export default async (knex: Knex): Promise<void> => {
     errorReason: "软件退出导致失败",
   });
 
+  // 矫正剧本重复数据，合并资产关联并清理孤立副本
+  if (await knex.schema.hasTable("o_script")) {
+    const allScripts = await knex("o_script").select("id", "projectId", "name", "content", "createTime").orderBy("id", "asc");
+    const scriptGroupMap: Record<string, typeof allScripts> = {};
+    for (const s of allScripts) {
+      const groupKey = `${s.projectId}___${s.name}`;
+      if (!scriptGroupMap[groupKey]) scriptGroupMap[groupKey] = [];
+      scriptGroupMap[groupKey].push(s);
+    }
+
+    for (const groupKey of Object.keys(scriptGroupMap)) {
+      const items = scriptGroupMap[groupKey];
+      if (items.length > 1) {
+        // 主记录保留第1条
+        const mainScript = items[0];
+        const duplicateIds = items.slice(1).map((i) => i.id);
+
+        // 将关联表中的 scriptId 迁移并去重
+        if (await knex.schema.hasTable("o_scriptAssets")) {
+          const mainAssets = await knex("o_scriptAssets").where("scriptId", mainScript.id).select("assetId");
+          const existingAssetIds = new Set(mainAssets.map((a: any) => a.assetId));
+
+          const dupAssets = await knex("o_scriptAssets").whereIn("scriptId", duplicateIds).select("assetId");
+          for (const da of dupAssets) {
+            if (!existingAssetIds.has(da.assetId)) {
+              await knex("o_scriptAssets").insert({ scriptId: mainScript.id, assetId: da.assetId });
+              existingAssetIds.add(da.assetId);
+            }
+          }
+          await knex("o_scriptAssets").whereIn("scriptId", duplicateIds).delete();
+        }
+
+        if (await knex.schema.hasTable("o_storyboard")) {
+          await knex("o_storyboard").whereIn("scriptId", duplicateIds).update({ scriptId: mainScript.id });
+        }
+        if (await knex.schema.hasTable("o_video")) {
+          await knex("o_video").whereIn("scriptId", duplicateIds).update({ scriptId: mainScript.id });
+        }
+        if (await knex.schema.hasTable("o_videoTrack")) {
+          await knex("o_videoTrack").whereIn("scriptId", duplicateIds).update({ scriptId: mainScript.id });
+        }
+
+        // 删除重复的剧本记录
+        await knex("o_script").whereIn("id", duplicateIds).delete();
+      }
+    }
+  }
+
   // 添加新字段
   await addColumn("o_prompt", "useData", "text");
   // 添加新字段
