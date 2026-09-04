@@ -255,7 +255,13 @@ class AiImage {
       const fn = await getVendorTemplateFn("imageRequest", mn);
       await referenceList2imageBase642(mn.split(/:(.+)/)[0], input);
       this.result = await fn(input);
+      if (!this.result || typeof this.result !== "string" || !this.result.trim()) {
+        throw new Error(`生图失败：模型 ${mn} 未返回有效的图片数据，请检查该供应商配置或模型是否支持生图`);
+      }
       if (this.result.startsWith("http")) this.result = await urlToBase64(this.result);
+      if (!this.result || !this.result.trim()) {
+        throw new Error(`生图失败：无法将图片链接转换为有效数据`);
+      }
       return this;
     };
     if (taskRecord) {
@@ -266,6 +272,9 @@ class AiImage {
     return this;
   }
   async save(path: string) {
+    if (!this.result || typeof this.result !== "string" || !this.result.trim()) {
+      throw new Error(`保存图片失败：图片数据为空`);
+    }
     await u.oss.writeFile(path, this.result);
     return this;
   }
@@ -303,8 +312,14 @@ class AiVideo {
         await referenceList2imageBase642(mn.split(/:(.+)/)[0], input);
 
         this.result = await fn(input);
+        if (!this.result || typeof this.result !== "string" || !this.result.trim()) {
+          throw new Error(`生成视频失败：模型 ${mn} 未返回有效的视频数据`);
+        }
 
         if (this.result.startsWith("http")) this.result = await urlToBase64(this.result);
+        if (!this.result || !this.result.trim()) {
+          throw new Error(`生成视频失败：无法将视频链接转换为有效数据`);
+        }
       };
       if (taskRecord) {
         await withTaskRecord(this.key, taskRecord.taskClass, taskRecord.describe, taskRecord.relatedObjects, taskRecord.projectId, exec);
@@ -317,6 +332,9 @@ class AiVideo {
     }
   }
   async save(path: string) {
+    if (!this.result || typeof this.result !== "string" || !this.result.trim()) {
+      throw new Error(`保存视频失败：视频数据为空`);
+    }
     await u.oss.writeFile(path, this.result);
     return this;
   }
@@ -330,14 +348,18 @@ class AiAudio {
   async run(input: VideoConfig, taskRecord?: TaskRecord) {
     const modelName = await resolveModelName(this.key);
     const exec = async (mn: `${string}:${string}`) => {
-      try {
-        const fn = await getVendorTemplateFn("ttsRequest", mn);
-        await referenceList2imageBase642(mn.split(/:(.+)/)[0], input);
-        this.result = await fn(input);
+      const fn = await getVendorTemplateFn("ttsRequest", mn);
+      await referenceList2imageBase642(mn.split(/:(.+)/)[0], input);
+      this.result = await fn(input);
+      if (!this.result || typeof this.result !== "string" || !this.result.trim()) {
+        throw new Error(`生成语音失败：模型 ${mn} 未返回有效的音频数据`);
+      }
 
-        if (this.result.startsWith("http")) this.result = await urlToBase64(this.result);
-        return this;
-      } catch (e) {}
+      if (this.result.startsWith("http")) this.result = await urlToBase64(this.result);
+      if (!this.result || !this.result.trim()) {
+        throw new Error(`生成语音失败：无法将音频链接转换为有效数据`);
+      }
+      return this;
     };
     if (taskRecord) {
       return withTaskRecord(this.key, taskRecord.taskClass, taskRecord.describe, taskRecord.relatedObjects, taskRecord.projectId, exec);
@@ -345,6 +367,9 @@ class AiAudio {
     return await exec(modelName);
   }
   async save(path: string) {
+    if (!this.result || typeof this.result !== "string" || !this.result.trim()) {
+      throw new Error(`保存语音失败：音频数据为空`);
+    }
     await u.oss.writeFile(path, this.result);
     return this;
   }
