@@ -105828,6 +105828,44 @@ var init_fixDB = __esm({
         state: "\u751F\u6210\u5931\u8D25",
         errorReason: "\u8F6F\u4EF6\u9000\u51FA\u5BFC\u81F4\u5931\u8D25"
       });
+      if (await knex3.schema.hasTable("o_script")) {
+        const allScripts = await knex3("o_script").select("id", "projectId", "name", "content", "createTime").orderBy("id", "asc");
+        const scriptGroupMap = {};
+        for (const s of allScripts) {
+          const groupKey = `${s.projectId}___${s.name}`;
+          if (!scriptGroupMap[groupKey]) scriptGroupMap[groupKey] = [];
+          scriptGroupMap[groupKey].push(s);
+        }
+        for (const groupKey of Object.keys(scriptGroupMap)) {
+          const items = scriptGroupMap[groupKey];
+          if (items.length > 1) {
+            const mainScript = items[0];
+            const duplicateIds = items.slice(1).map((i) => i.id);
+            if (await knex3.schema.hasTable("o_scriptAssets")) {
+              const mainAssets = await knex3("o_scriptAssets").where("scriptId", mainScript.id).select("assetId");
+              const existingAssetIds = new Set(mainAssets.map((a) => a.assetId));
+              const dupAssets = await knex3("o_scriptAssets").whereIn("scriptId", duplicateIds).select("assetId");
+              for (const da of dupAssets) {
+                if (!existingAssetIds.has(da.assetId)) {
+                  await knex3("o_scriptAssets").insert({ scriptId: mainScript.id, assetId: da.assetId });
+                  existingAssetIds.add(da.assetId);
+                }
+              }
+              await knex3("o_scriptAssets").whereIn("scriptId", duplicateIds).delete();
+            }
+            if (await knex3.schema.hasTable("o_storyboard")) {
+              await knex3("o_storyboard").whereIn("scriptId", duplicateIds).update({ scriptId: mainScript.id });
+            }
+            if (await knex3.schema.hasTable("o_video")) {
+              await knex3("o_video").whereIn("scriptId", duplicateIds).update({ scriptId: mainScript.id });
+            }
+            if (await knex3.schema.hasTable("o_videoTrack")) {
+              await knex3("o_videoTrack").whereIn("scriptId", duplicateIds).update({ scriptId: mainScript.id });
+            }
+            await knex3("o_script").whereIn("id", duplicateIds).delete();
+          }
+        }
+      }
       await addColumn("o_prompt", "useData", "text");
       await addColumn("o_agentDeploy", "type", "string");
       await addColumn("o_agentDeploy", "temperature", "integer");
@@ -116360,6 +116398,9 @@ var init_oss = __esm({
         const absPath = resolveSafeLocalPath(userRelPath, this.rootDir);
         await import_promises3.default.mkdir(import_node_path2.default.dirname(absPath), { recursive: true });
         const buffer = typeof data === "string" ? Buffer.from(data.replace(/^data:[^;]+;base64,/, ""), "base64") : data;
+        if (buffer.length === 0) {
+          throw new Error(`\u5199\u5165\u6587\u4EF6\u5931\u8D25\uFF1A\u6587\u4EF6\u5185\u5BB9\u4E3A\u7A7A (${userRelPath})`);
+        }
         await import_promises3.default.writeFile(absPath, buffer);
       }
       /**
@@ -237019,7 +237060,13 @@ var init_ai = __esm({
           const fn = await getVendorTemplateFn("imageRequest", mn);
           await referenceList2imageBase642(mn.split(/:(.+)/)[0], input);
           this.result = await fn(input);
+          if (!this.result || typeof this.result !== "string" || !this.result.trim()) {
+            throw new Error(`\u751F\u56FE\u5931\u8D25\uFF1A\u6A21\u578B ${mn} \u672A\u8FD4\u56DE\u6709\u6548\u7684\u56FE\u7247\u6570\u636E\uFF0C\u8BF7\u68C0\u67E5\u8BE5\u4F9B\u5E94\u5546\u914D\u7F6E\u6216\u6A21\u578B\u662F\u5426\u652F\u6301\u751F\u56FE`);
+          }
           if (this.result.startsWith("http")) this.result = await urlToBase642(this.result);
+          if (!this.result || !this.result.trim()) {
+            throw new Error(`\u751F\u56FE\u5931\u8D25\uFF1A\u65E0\u6CD5\u5C06\u56FE\u7247\u94FE\u63A5\u8F6C\u6362\u4E3A\u6709\u6548\u6570\u636E`);
+          }
           return this;
         };
         if (taskRecord2) {
@@ -237030,6 +237077,9 @@ var init_ai = __esm({
         return this;
       }
       async save(path34) {
+        if (!this.result || typeof this.result !== "string" || !this.result.trim()) {
+          throw new Error(`\u4FDD\u5B58\u56FE\u7247\u5931\u8D25\uFF1A\u56FE\u7247\u6570\u636E\u4E3A\u7A7A`);
+        }
         await utils_default.oss.writeFile(path34, this.result);
         return this;
       }
@@ -237047,7 +237097,13 @@ var init_ai = __esm({
             const fn = await getVendorTemplateFn("videoRequest", mn);
             await referenceList2imageBase642(mn.split(/:(.+)/)[0], input);
             this.result = await fn(input);
+            if (!this.result || typeof this.result !== "string" || !this.result.trim()) {
+              throw new Error(`\u751F\u6210\u89C6\u9891\u5931\u8D25\uFF1A\u6A21\u578B ${mn} \u672A\u8FD4\u56DE\u6709\u6548\u7684\u89C6\u9891\u6570\u636E`);
+            }
             if (this.result.startsWith("http")) this.result = await urlToBase642(this.result);
+            if (!this.result || !this.result.trim()) {
+              throw new Error(`\u751F\u6210\u89C6\u9891\u5931\u8D25\uFF1A\u65E0\u6CD5\u5C06\u89C6\u9891\u94FE\u63A5\u8F6C\u6362\u4E3A\u6709\u6548\u6570\u636E`);
+            }
           };
           if (taskRecord2) {
             await withTaskRecord(this.key, taskRecord2.taskClass, taskRecord2.describe, taskRecord2.relatedObjects, taskRecord2.projectId, exec2);
@@ -237060,6 +237116,9 @@ var init_ai = __esm({
         }
       }
       async save(path34) {
+        if (!this.result || typeof this.result !== "string" || !this.result.trim()) {
+          throw new Error(`\u4FDD\u5B58\u89C6\u9891\u5931\u8D25\uFF1A\u89C6\u9891\u6570\u636E\u4E3A\u7A7A`);
+        }
         await utils_default.oss.writeFile(path34, this.result);
         return this;
       }
@@ -237073,14 +237132,17 @@ var init_ai = __esm({
       async run(input, taskRecord2) {
         const modelName = await resolveModelName(this.key);
         const exec2 = async (mn) => {
-          try {
-            const fn = await getVendorTemplateFn("ttsRequest", mn);
-            await referenceList2imageBase642(mn.split(/:(.+)/)[0], input);
-            this.result = await fn(input);
-            if (this.result.startsWith("http")) this.result = await urlToBase642(this.result);
-            return this;
-          } catch (e) {
+          const fn = await getVendorTemplateFn("ttsRequest", mn);
+          await referenceList2imageBase642(mn.split(/:(.+)/)[0], input);
+          this.result = await fn(input);
+          if (!this.result || typeof this.result !== "string" || !this.result.trim()) {
+            throw new Error(`\u751F\u6210\u8BED\u97F3\u5931\u8D25\uFF1A\u6A21\u578B ${mn} \u672A\u8FD4\u56DE\u6709\u6548\u7684\u97F3\u9891\u6570\u636E`);
           }
+          if (this.result.startsWith("http")) this.result = await urlToBase642(this.result);
+          if (!this.result || !this.result.trim()) {
+            throw new Error(`\u751F\u6210\u8BED\u97F3\u5931\u8D25\uFF1A\u65E0\u6CD5\u5C06\u97F3\u9891\u94FE\u63A5\u8F6C\u6362\u4E3A\u6709\u6548\u6570\u636E`);
+          }
+          return this;
         };
         if (taskRecord2) {
           return withTaskRecord(this.key, taskRecord2.taskClass, taskRecord2.describe, taskRecord2.relatedObjects, taskRecord2.projectId, exec2);
@@ -237088,6 +237150,9 @@ var init_ai = __esm({
         return await exec2(modelName);
       }
       async save(path34) {
+        if (!this.result || typeof this.result !== "string" || !this.result.trim()) {
+          throw new Error(`\u4FDD\u5B58\u8BED\u97F3\u5931\u8D25\uFF1A\u97F3\u9891\u6570\u636E\u4E3A\u7A7A`);
+        }
         await utils_default.oss.writeFile(path34, this.result);
         return this;
       }
@@ -238527,7 +238592,22 @@ var init_p_limit = __esm({
 });
 
 // src/routes/assetsGenerate/batchGenerateImageAssets.ts
-function buildPrompt(cfg, artStyle, name28, prompt) {
+function buildPrompt(cfg, artStyle, name28, prompt, isDerived = false) {
+  if (isDerived) {
+    return `
+    \u8BF7\u6839\u636E\u4EE5\u4E0B\u53C2\u6570\u751F\u6210${cfg.label}\u884D\u751F\u72B6\u6001\u56FE\uFF1A
+
+    **\u57FA\u7840\u53C2\u6570\uFF1A**
+    - \u753B\u98CE\u98CE\u683C: ${artStyle || "\u672A\u6307\u5B9A"}
+    - \u7EA6\u675F\u539F\u5219: \u4EE5\u53C2\u8003\u56FE\u4E3A\u57FA\u51C6\uFF0C\u4FDD\u6301\u89D2\u8272\u9762\u5BB9\u3001\u4E94\u5B98\u53CA\u6838\u5FC3\u4F53\u6001\u7279\u5F81\u4E25\u683C\u4E00\u81F4\uFF0C\u8FDB\u884C\u670D\u5316\u3001\u88C5\u9020\u6216\u573A\u666F\u65F6\u95F4/\u72B6\u6001\u6F14\u53D8
+
+    **${cfg.label}\u884D\u751F\u8BBE\u5B9A\uFF1A**
+    - \u540D\u79F0: ${name28}
+    - \u884D\u751F\u63D0\u793A\u8BCD: ${prompt}
+
+    \u8BF7\u4E25\u683C\u6309\u7167\u7CFB\u7EDF\u89C4\u8303\u751F\u6210${cfg.label}\u884D\u751F\u56FE\u3002
+    `;
+  }
   return `
     \u8BF7\u6839\u636E\u4EE5\u4E0B\u53C2\u6570\u751F\u6210${cfg.promptTitle}\uFF1A
 
@@ -238615,9 +238695,25 @@ var init_batchGenerateImageAssets = __esm({
           }
           const cfg = assetTypeConfig[item.type];
           if (!cfg) return;
+          const currentAsset = await utils_default.db("o_assets").where("id", item.id).first();
+          const isDerived = Boolean(currentAsset?.assetsId);
+          let refBase64 = item.base64;
+          if (!refBase64 && isDerived && currentAsset?.assetsId) {
+            try {
+              const parentAsset = await utils_default.db("o_assets").where("id", currentAsset.assetsId).first();
+              if (parentAsset?.imageId) {
+                const parentImage = await utils_default.db("o_image").where("id", parentAsset.imageId).first();
+                if (parentImage?.filePath) {
+                  refBase64 = await utils_default.oss.getImageBase64(parentImage.filePath);
+                }
+              }
+            } catch (parentErr) {
+              console.warn(`[\u6279\u91CF\u8D44\u4EA7\u751F\u6210] \u8BFB\u53D6\u7236\u8D44\u4EA7\u53C2\u8003\u56FE\u5931\u8D25: assetsId=${currentAsset.assetsId}`, parentErr);
+            }
+          }
           await utils_default.db("o_assets").where("id", item.id).update({ imageId });
           const imagePath = `/${projectId}/${cfg.dir}/${v4_default()}.jpg`;
-          const userPrompt = buildPrompt(cfg, project.artStyle ?? "", item.name, item.prompt);
+          const userPrompt = buildPrompt(cfg, project.artStyle ?? "", item.name, item.prompt, isDerived);
           const describe4 = `\u751F\u6210${cfg.label}\u56FE\uFF0C\u540D\u79F0\uFF1A${item.name}\uFF0C\u63D0\u793A\u8BCD\uFF1A${item.prompt}`;
           const relatedObjects = { id: item.id, projectId, type: cfg.label };
           try {
@@ -238625,7 +238721,7 @@ var init_batchGenerateImageAssets = __esm({
             await aiImage.run(
               {
                 prompt: userPrompt,
-                referenceList: item.base64 ? [{ base64: item.base64, type: "image" }] : [],
+                referenceList: refBase64 ? [{ base64: refBase64, type: "image" }] : [],
                 size: resolution,
                 aspectRatio: "16:9"
               },
@@ -238636,7 +238732,7 @@ var init_batchGenerateImageAssets = __esm({
                 relatedObjects: JSON.stringify(relatedObjects)
               }
             );
-            aiImage.save(imagePath);
+            await aiImage.save(imagePath);
             const imageData = await utils_default.db("o_image").where("id", imageId).select("*").first();
             if (!imageData) return res.status(500).send("\u8D44\u4EA7\u5DF2\u88AB\u5220\u9664");
             if (!imageData) return;
@@ -238795,7 +238891,22 @@ var init_cancelGenerate = __esm({
 });
 
 // src/routes/assetsGenerate/generateAssets.ts
-function buildPrompt2(cfg, artStyle, name28, prompt) {
+function buildPrompt2(cfg, artStyle, name28, prompt, isDerived = false) {
+  if (isDerived) {
+    return `
+    \u8BF7\u6839\u636E\u4EE5\u4E0B\u53C2\u6570\u751F\u6210${cfg.label}\u884D\u751F\u72B6\u6001\u56FE\uFF1A
+
+    **\u57FA\u7840\u53C2\u6570\uFF1A**
+    - \u753B\u98CE\u98CE\u683C: ${artStyle || "\u672A\u6307\u5B9A"}
+    - \u7EA6\u675F\u539F\u5219: \u4EE5\u53C2\u8003\u56FE\u4E3A\u57FA\u51C6\uFF0C\u4FDD\u6301\u89D2\u8272\u9762\u5BB9\u3001\u4E94\u5B98\u53CA\u6838\u5FC3\u4F53\u6001\u7279\u5F81\u4E25\u683C\u4E00\u81F4\uFF0C\u8FDB\u884C\u670D\u5316\u3001\u88C5\u9020\u6216\u573A\u666F\u65F6\u95F4/\u72B6\u6001\u6F14\u53D8
+
+    **${cfg.label}\u884D\u751F\u8BBE\u5B9A\uFF1A**
+    - \u540D\u79F0: ${name28}
+    - \u884D\u751F\u63D0\u793A\u8BCD: ${prompt}
+
+    \u8BF7\u4E25\u683C\u6309\u7167\u7CFB\u7EDF\u89C4\u8303\u751F\u6210${cfg.label}\u884D\u751F\u56FE\u3002
+    `;
+  }
   return `
     \u8BF7\u6839\u636E\u4EE5\u4E0B\u53C2\u6570\u751F\u6210${cfg.promptTitle}\uFF1A
 
@@ -238859,6 +238970,22 @@ var init_generateAssets = __esm({
       if (!project) return res.status(500).send(success3({ message: "\u9879\u76EE\u4E3A\u7A7A" }));
       const cfg = assetTypeConfig2[type];
       if (!cfg) return res.status(400).send(error50("\u4E0D\u652F\u6301\u7684\u7C7B\u578B"));
+      const currentAsset = await utils_default.db("o_assets").where("id", id).first();
+      const isDerived = Boolean(currentAsset?.assetsId);
+      let refBase64 = base644;
+      if (!refBase64 && isDerived && currentAsset?.assetsId) {
+        try {
+          const parentAsset = await utils_default.db("o_assets").where("id", currentAsset.assetsId).first();
+          if (parentAsset?.imageId) {
+            const parentImage = await utils_default.db("o_image").where("id", parentAsset.imageId).first();
+            if (parentImage?.filePath) {
+              refBase64 = await utils_default.oss.getImageBase64(parentImage.filePath);
+            }
+          }
+        } catch (parentErr) {
+          console.warn(`[\u624B\u52A8\u751F\u6210\u8D44\u4EA7] \u8BFB\u53D6\u7236\u8D44\u4EA7\u53C2\u8003\u56FE\u5931\u8D25: assetsId=${currentAsset.assetsId}`, parentErr);
+        }
+      }
       const [imageId] = await utils_default.db("o_image").insert({
         type,
         state: "\u751F\u6210\u4E2D",
@@ -238868,7 +238995,7 @@ var init_generateAssets = __esm({
       });
       await utils_default.db("o_assets").where("id", id).update({ imageId });
       const imagePath = `/${projectId}/${cfg.dir}/${v4_default()}.jpg`;
-      const userPrompt = buildPrompt2(cfg, project.artStyle, name28, prompt);
+      const userPrompt = buildPrompt2(cfg, project.artStyle, name28, prompt, isDerived);
       const describe4 = `\u751F\u6210${cfg.label}\u56FE\uFF0C\u540D\u79F0\uFF1A${name28}\uFF0C\u63D0\u793A\u8BCD\uFF1A${prompt}`;
       const relatedObjects = { id, projectId, type: cfg.label };
       try {
@@ -238876,7 +239003,7 @@ var init_generateAssets = __esm({
         await aiImage.run(
           {
             prompt: userPrompt,
-            referenceList: base644 ? [{ type: "image", base64: base644 }] : [],
+            referenceList: refBase64 ? [{ type: "image", base64: refBase64 }] : [],
             size: resolution,
             aspectRatio: "16:9"
           },
@@ -238887,7 +239014,7 @@ var init_generateAssets = __esm({
             relatedObjects: JSON.stringify(relatedObjects)
           }
         );
-        aiImage.save(imagePath);
+        await aiImage.save(imagePath);
         const imageData = await utils_default.db("o_image").where("id", imageId).select("*").first();
         if (!imageData) return res.status(500).send("\u8D44\u4EA7\u5DF2\u88AB\u5220\u9664");
         if (imageData.state === "\u751F\u6210\u5931\u8D25") return;
@@ -239945,22 +240072,35 @@ var init_batchGenerateAssetsImage = __esm({
         const generateSingleAsset = async (item) => {
           const imageId = imageIdMap[item.id];
           const typeConfig = promptRecord[item.type] || promptRecord["role"];
-          const { text: text2 } = await utils_default.Ai.Text("universalAi").invoke({
-            system: `${typeConfig.prompt}`,
-            messages: [
-              {
-                role: "user",
-                content: `
-            \u7236\u7EA7\u8D44\u4EA7\u63CF\u8FF0: ${item.parentDescribe || "\u65E0\u8BE6\u7EC6\u63CF\u8FF0"}
-            \u5F53\u524D\u8D44\u4EA7\u63CF\u8FF0: ${item.describe || "\u65E0\u8BE6\u7EC6\u63CF\u8FF0"}`
-              }
-            ]
-          });
-          await utils_default.db("o_assets").where("id", item.id).update({ prompt: text2 });
-          const imageBase64 = imageUrlRecord[item.assetsId] ? await utils_default.oss.getImageBase64(imageUrlRecord[item.assetsId]) : null;
           try {
+            let promptText = item.prompt;
+            if (!promptText || promptText.trim() === "") {
+              const { text: text2 } = await utils_default.Ai.Text("universalAi").invoke({
+                system: `${typeConfig.prompt}`,
+                messages: [
+                  {
+                    role: "user",
+                    content: `
+                \u7236\u7EA7\u8D44\u4EA7\u63CF\u8FF0: ${item.parentDescribe || "\u65E0\u8BE6\u7EC6\u63CF\u8FF0"}
+                \u5F53\u524D\u8D44\u4EA7\u63CF\u8FF0: ${item.describe || "\u65E0\u8BE6\u7EC6\u63CF\u8FF0"}`
+                  }
+                ]
+              });
+              promptText = text2;
+              await utils_default.db("o_assets").where("id", item.id).update({ prompt: promptText });
+            }
+            let imageBase64 = null;
+            const parentImagePath = imageUrlRecord[item.assetsId];
+            if (parentImagePath) {
+              try {
+                imageBase64 = await utils_default.oss.getImageBase64(parentImagePath);
+              } catch (fileErr) {
+                console.warn(`[\u884D\u751F\u8D44\u4EA7\u751F\u6210] \u8BFB\u53D6\u7236\u8D44\u4EA7\u5E95\u56FE\u5931\u8D25\uFF0C\u5C06\u964D\u7EA7\u6587\u751F\u56FE: ${parentImagePath}`, fileErr);
+                imageBase64 = null;
+              }
+            }
             const repeloadObj = {
-              prompt: text2,
+              prompt: promptText,
               size: projectSettingData?.imageQuality,
               aspectRatio: "16:9"
             };
@@ -239979,13 +240119,16 @@ var init_batchGenerateAssetsImage = __esm({
             const savePath = `/${projectId}/assets/${scriptId}/${item.type}/${utils_default.uuid()}.jpg`;
             await imageCls.save(savePath);
             await utils_default.db("o_image").where({ id: imageId }).update({ state: "\u5DF2\u5B8C\u6210", filePath: savePath });
+            await utils_default.db("o_assets").where("id", item.id).update({ imageId });
             return {
               id: item.id,
               state: "\u5DF2\u5B8C\u6210",
               src: await utils_default.oss.getSmallImageUrl(savePath)
             };
           } catch (e) {
-            await utils_default.db("o_image").where({ id: imageId }).update({ state: "\u751F\u6210\u5931\u8D25", errorReason: utils_default.error(e).message });
+            const errorMsg = utils_default.error(e).message || "\u884D\u751F\u8D44\u4EA7\u751F\u6210\u5931\u8D25";
+            console.error(`[\u884D\u751F\u8D44\u4EA7\u751F\u6210\u5931\u8D25] \u8D44\u4EA7ID: ${item.id}`, errorMsg);
+            await utils_default.db("o_image").where({ id: imageId }).update({ state: "\u751F\u6210\u5931\u8D25", errorReason: errorMsg });
             return {
               id: item.id,
               state: "\u751F\u6210\u5931\u8D25",
@@ -254096,17 +254239,46 @@ var init_setPlanData = __esm({
         await utils_default.db("o_agentWorkData").where({ projectId, key: agentType }).update({
           data: JSON.stringify(data)
         });
-        const script = data.script;
-        await Promise.all(
-          script.map(async (s) => {
-            const row = await utils_default.db("o_script").where({ projectId, name: s.name }).first();
-            if (row) {
-              await utils_default.db("o_script").where({ id: row.id }).update({ content: s.content });
-            } else {
-              await utils_default.db("o_script").insert({ projectId, name: s.name, content: s.content });
+        const rawScript = data?.script;
+        if (Array.isArray(rawScript) && rawScript.length > 0) {
+          const scriptMap = /* @__PURE__ */ new Map();
+          for (const s of rawScript) {
+            if (s && s.name) {
+              scriptMap.set(s.name, s);
             }
-          })
-        );
+          }
+          const uniqueScripts = Array.from(scriptMap.values());
+          for (const s of uniqueScripts) {
+            const rows = await utils_default.db("o_script").where({ projectId, name: s.name }).select("id").orderBy("id", "asc");
+            if (rows.length > 0) {
+              const mainId = rows[0].id;
+              await utils_default.db("o_script").where({ id: mainId }).update({
+                content: s.content
+              });
+              if (rows.length > 1) {
+                const extraIds = rows.slice(1).map((r) => r.id);
+                const mainAssets = await utils_default.db("o_scriptAssets").where("scriptId", mainId).select("assetId");
+                const existingAssetIds = new Set(mainAssets.map((a) => a.assetId));
+                const dupAssets = await utils_default.db("o_scriptAssets").whereIn("scriptId", extraIds).select("assetId");
+                for (const da of dupAssets) {
+                  if (!existingAssetIds.has(da.assetId)) {
+                    await utils_default.db("o_scriptAssets").insert({ scriptId: mainId, assetId: da.assetId });
+                    existingAssetIds.add(da.assetId);
+                  }
+                }
+                await utils_default.db("o_scriptAssets").whereIn("scriptId", extraIds).delete();
+                await utils_default.db("o_script").whereIn("id", extraIds).delete();
+              }
+            } else {
+              await utils_default.db("o_script").insert({
+                projectId,
+                name: s.name,
+                content: s.content,
+                createTime: Date.now()
+              });
+            }
+          }
+        }
         res.status(200).send(success3());
       }
     );
@@ -257160,6 +257332,28 @@ var tools_default = (toolCpnfig) => {
     }),
     generate_deriveAsset: tool({
       description: "\u751F\u6210\u884D\u751F\u8D44\u4EA7\u56FE\u7247",
+      inputSchema: jsonSchema(
+        external_exports.object({
+          ids: external_exports.array(external_exports.number()).describe("\u9700\u8981\u751F\u6210\u7684 \u884D\u751F\u8D44\u4EA7ID")
+        }).toJSONSchema()
+      ),
+      execute: async ({ ids }) => {
+        const thinking = msg.thinking("\u6B63\u5728\u751F\u6210\u884D\u751F\u8D44\u4EA7...");
+        new Promise((resolve3) => socket.emit("generateDeriveAsset", { ids }, (res) => resolve3(res))).then((res) => {
+          thinking.appendText(`\u5DF2\u751F\u6210\u884D\u751F\u8D44\u4EA7\uFF0CID: ${JSON.stringify(res, null, 2)}
+`);
+          thinking.updateTitle("\u884D\u751F\u8D44\u4EA7\u5F00\u59CB\u5B8C\u6210");
+          thinking.complete();
+        }).catch((e) => {
+          thinking.appendText("\u884D\u751F\u8D44\u4EA7\u751F\u6210\u5931\u8D25:\n" + utils_default.error(e).message);
+          thinking.updateTitle("\u884D\u751F\u8D44\u4EA7\u751F\u6210\u5931\u8D25");
+          thinking.complete();
+        });
+        return "\u5F00\u59CB\u751F\u6210\u884D\u751F\u8D44\u4EA7";
+      }
+    }),
+    generate_assets_images: tool({
+      description: "\u751F\u6210\u884D\u751F\u8D44\u4EA7\u56FE\u7247\uFF08\u522B\u540D\uFF09",
       inputSchema: jsonSchema(
         external_exports.object({
           ids: external_exports.array(external_exports.number()).describe("\u9700\u8981\u751F\u6210\u7684 \u884D\u751F\u8D44\u4EA7ID")
