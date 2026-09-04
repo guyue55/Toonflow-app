@@ -71,23 +71,40 @@ export default router.post(
       const imageId = imageIdMap[item.id!];
       const typeConfig = promptRecord[item.type!] || promptRecord["role"];
 
-      const { text } = await u.Ai.Text("universalAi").invoke({
-        system: `${typeConfig.prompt}`,
-        messages: [
-          {
-            role: "user",
-            content: `
-            父级资产描述: ${item.parentDescribe || "无详细描述"}
-            当前资产描述: ${item.describe || "无详细描述"}`,
-          },
-        ],
-      });
-        await u.db("o_assets").where("id", item.id).update({ prompt: text });
-
-      const imageBase64 = imageUrlRecord[item.assetsId!] ? await u.oss.getImageBase64(imageUrlRecord[item.assetsId!]) : null;
       try {
+        // 1. 获取或生成衍生提示词
+        let promptText = item.prompt;
+        if (!promptText || promptText.trim() === "") {
+          const { text } = await u.Ai.Text("universalAi").invoke({
+            system: `${typeConfig.prompt}`,
+            messages: [
+              {
+                role: "user",
+                content: `
+                父级资产描述: ${item.parentDescribe || "无详细描述"}
+                当前资产描述: ${item.describe || "无详细描述"}`,
+              },
+            ],
+          });
+          promptText = text;
+          await u.db("o_assets").where("id", item.id).update({ prompt: promptText });
+        }
+
+        // 2. 安全读取父级资产参考图 Base64（若文件缺失则容错降级，避免崩溃）
+        let imageBase64: string | null = null;
+        const parentImagePath = imageUrlRecord[item.assetsId!];
+        if (parentImagePath) {
+          try {
+            imageBase64 = await u.oss.getImageBase64(parentImagePath);
+          } catch (fileErr) {
+            console.warn(`[衍生资产生成] 读取父资产底图失败，将降级文生图: ${parentImagePath}`, fileErr);
+            imageBase64 = null;
+          }
+        }
+
+        // 3. 构造生图配置并执行
         const repeloadObj = {
-          prompt: text,
+          prompt: promptText,
           size: projectSettingData?.imageQuality as "1K" | "2K" | "4K",
           aspectRatio: "16:9" as `${number}:${number}`,
         };
@@ -106,16 +123,19 @@ export default router.post(
         const savePath = `/${projectId}/assets/${scriptId}/${item.type}/${u.uuid()}.jpg`;
         await imageCls.save(savePath);
         await u.db("o_image").where({ id: imageId }).update({ state: "已完成", filePath: savePath });
+        await u.db("o_assets").where("id", item.id).update({ imageId: imageId });
         return {
           id: item.id!,
           state: "已完成",
           src: await u.oss.getSmallImageUrl(savePath),
         };
       } catch (e) {
+        const errorMsg = u.error(e).message || "衍生资产生成失败";
+        console.error(`[衍生资产生成失败] 资产ID: ${item.id}`, errorMsg);
         await u
           .db("o_image")
           .where({ id: imageId })
-          .update({ state: "生成失败", errorReason: u.error(e).message });
+          .update({ state: "生成失败", errorReason: errorMsg });
         return {
           id: item.id!,
           state: "生成失败",

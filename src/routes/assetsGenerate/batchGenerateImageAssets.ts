@@ -42,7 +42,22 @@ const assetTypeConfig: Record<AssetType, AssetTypeConfig> = {
   },
 };
 
-function buildPrompt(cfg: AssetTypeConfig, artStyle: string, name: string, prompt: string): string {
+function buildPrompt(cfg: AssetTypeConfig, artStyle: string, name: string, prompt: string, isDerived: boolean = false): string {
+  if (isDerived) {
+    return `
+    请根据以下参数生成${cfg.label}衍生状态图：
+
+    **基础参数：**
+    - 画风风格: ${artStyle || "未指定"}
+    - 约束原则: 以参考图为基准，保持角色面容、五官及核心体态特征严格一致，进行服化、装造或场景时间/状态演变
+
+    **${cfg.label}衍生设定：**
+    - 名称: ${name}
+    - 衍生提示词: ${prompt}
+
+    请严格按照系统规范生成${cfg.label}衍生图。
+    `;
+  }
   return `
     请根据以下参数生成${cfg.promptTitle}：
 
@@ -105,10 +120,29 @@ export default router.post("/", validateFields(requestSchema), async (req, res) 
       const cfg = assetTypeConfig[item.type as AssetType];
       if (!cfg) return;
 
+      // 查询当前资产以判断是否为衍生资产
+      const currentAsset = await u.db("o_assets").where("id", item.id).first();
+      const isDerived = Boolean(currentAsset?.assetsId);
+      let refBase64 = item.base64;
+
+      if (!refBase64 && isDerived && currentAsset?.assetsId) {
+        try {
+          const parentAsset = await u.db("o_assets").where("id", currentAsset.assetsId).first();
+          if (parentAsset?.imageId) {
+            const parentImage = await u.db("o_image").where("id", parentAsset.imageId).first();
+            if (parentImage?.filePath) {
+              refBase64 = await u.oss.getImageBase64(parentImage.filePath);
+            }
+          }
+        } catch (parentErr) {
+          console.warn(`[批量资产生成] 读取父资产参考图失败: assetsId=${currentAsset.assetsId}`, parentErr);
+        }
+      }
+
       await u.db("o_assets").where("id", item.id).update({ imageId });
 
       const imagePath = `/${projectId}/${cfg.dir}/${uuidv4()}.jpg`;
-      const userPrompt = buildPrompt(cfg, project.artStyle ?? "", item.name, item.prompt);
+      const userPrompt = buildPrompt(cfg, project.artStyle ?? "", item.name, item.prompt, isDerived);
       const describe = `生成${cfg.label}图，名称：${item.name}，提示词：${item.prompt}`;
       const relatedObjects = { id: item.id, projectId, type: cfg.label };
       try {
@@ -116,7 +150,7 @@ export default router.post("/", validateFields(requestSchema), async (req, res) 
         await aiImage.run(
           {
             prompt: userPrompt,
-            referenceList: item.base64 ? [{ base64: item.base64, type: "image" }] : [],
+            referenceList: refBase64 ? [{ base64: refBase64, type: "image" }] : [],
             size: resolution,
             aspectRatio: "16:9",
           },
@@ -127,7 +161,7 @@ export default router.post("/", validateFields(requestSchema), async (req, res) 
             relatedObjects: JSON.stringify(relatedObjects),
           },
         );
-        aiImage.save(imagePath);
+        await aiImage.save(imagePath);
 
         const imageData = await u.db("o_image").where("id", imageId).select("*").first();
         if (!imageData) return res.status(500).send("资产已被删除");
