@@ -206,6 +206,32 @@ export default (toolCpnfig: ToolConfig) => {
         return "开始生成衍生资产";
       },
     }),
+    generate_assets_images: tool({
+      description: "生成衍生资产图片（别名）",
+      inputSchema: jsonSchema<{ ids: number[] }>(
+        z
+          .object({
+            ids: z.array(z.number()).describe("需要生成的 衍生资产ID"),
+          })
+          .toJSONSchema(),
+      ),
+      execute: async ({ ids }) => {
+        const thinking = msg.thinking("正在生成衍生资产...");
+        new Promise((resolve) => socket.emit("generateDeriveAsset", { ids }, (res: any) => resolve(res)))
+          .then((res) => {
+            thinking.appendText(`已生成衍生资产，ID: ${JSON.stringify(res, null, 2)}\n`);
+            thinking.updateTitle("衍生资产开始完成");
+            thinking.complete();
+          })
+          .catch((e) => {
+            thinking.appendText("衍生资产生成失败:\n" + u.error(e).message);
+            thinking.updateTitle("衍生资产生成失败");
+            thinking.complete();
+          });
+
+        return "开始生成衍生资产";
+      },
+    }),
     generate_storyboard: tool({
       description: "生成分镜图片",
       inputSchema: jsonSchema<{ ids: number[] }>(
