@@ -46,6 +46,7 @@ db.sqlite-wal
 web/*
 
 *.sqlite
+*.db
 
 router.ts
 
