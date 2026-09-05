@@ -254236,9 +254236,36 @@ var init_setPlanData = __esm({
       }),
       async (req, res) => {
         const { projectId, agentType, data } = req.body;
-        await utils_default.db("o_agentWorkData").where({ projectId, key: agentType }).update({
-          data: JSON.stringify(data)
-        });
+        const existing = await utils_default.db("o_agentWorkData").where({ projectId, key: agentType }).first();
+        if (!existing) {
+          await utils_default.db("o_agentWorkData").insert({
+            projectId,
+            key: agentType,
+            data: JSON.stringify(data),
+            createTime: Date.now(),
+            updateTime: Date.now()
+          });
+        } else {
+          const current = (() => {
+            try {
+              return JSON.parse(existing.data ?? "{}");
+            } catch {
+              return {};
+            }
+          })();
+          const safeData = { ...data };
+          for (const k of ["storySkeleton", "adaptationStrategy"]) {
+            if (typeof safeData[k] === "string" && safeData[k].trim() === "" && typeof current[k] === "string" && current[k].trim() !== "") {
+              safeData[k] = current[k];
+            }
+          }
+          await utils_default.db("o_agentWorkData").where({ id: existing.id }).update({
+            data: JSON.stringify(safeData),
+            updateTime: Date.now()
+          });
+          res.status(200).send(success3({ data: safeData }));
+          return;
+        }
         const rawScript = data?.script;
         if (Array.isArray(rawScript) && rawScript.length > 0) {
           const scriptMap = /* @__PURE__ */ new Map();
@@ -257001,6 +257028,131 @@ ${list2}` }]
 };
 var memory_default = Memory;
 
+// src/utils/agent/planData.ts
+init_utils3();
+
+// src/utils/agent/xmlTags.ts
+function parseAttrs(attrStr) {
+  const attrs = {};
+  const attrRe = /([:\w-]+)\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s"'<>`]+))/g;
+  let am;
+  while ((am = attrRe.exec(attrStr)) !== null) {
+    attrs[am[1]] = am[2] ?? am[3] ?? am[4] ?? "";
+  }
+  return attrs;
+}
+function extractXmlTags(text2, tag) {
+  const results = [];
+  const tokenRe = new RegExp(`<(/?)${tag}(\\s[^>]*)?>`, "g");
+  const stack = [];
+  let m;
+  while ((m = tokenRe.exec(text2)) !== null) {
+    const isClose = m[1] === "/";
+    if (!isClose) {
+      stack.push({ attrs: parseAttrs(m[2] ?? ""), start: m.index + m[0].length });
+    } else {
+      const open = stack.pop();
+      if (open) {
+        const content = text2.slice(open.start, m.index).trim();
+        const hasNested = new RegExp(`<${tag}(\\s[^>]*)?>`).test(content);
+        if (!hasNested) {
+          results.push({ attrs: open.attrs, content });
+        }
+      }
+    }
+  }
+  return results;
+}
+
+// src/utils/agent/planData.ts
+async function mergeScriptPlanData(projectId, patch) {
+  const row = await utils_default.db("o_agentWorkData").where({ projectId, key: "scriptAgent" }).first();
+  let data = {};
+  if (row?.data) {
+    try {
+      data = JSON.parse(row.data);
+    } catch {
+      data = {};
+    }
+  }
+  if (patch.storySkeleton !== void 0) data.storySkeleton = patch.storySkeleton;
+  if (patch.adaptationStrategy !== void 0) data.adaptationStrategy = patch.adaptationStrategy;
+  if (Array.isArray(patch.script) && patch.script.length > 0) {
+    const scriptMap = /* @__PURE__ */ new Map();
+    for (const s of patch.script) {
+      if (s && s.name) scriptMap.set(s.name, s);
+    }
+    for (const s of scriptMap.values()) {
+      const rows = await utils_default.db("o_script").where({ projectId, name: s.name }).select("id").orderBy("id", "asc");
+      if (rows.length > 0) {
+        await utils_default.db("o_script").where({ id: rows[0].id }).update({ content: s.content });
+      } else {
+        await utils_default.db("o_script").insert({ projectId, name: s.name, content: s.content, createTime: Date.now() });
+      }
+    }
+  }
+  const payload = JSON.stringify(data);
+  if (row) {
+    await utils_default.db("o_agentWorkData").where({ id: row.id }).update({ data: payload, updateTime: Date.now() });
+  } else {
+    await utils_default.db("o_agentWorkData").insert({ projectId, key: "scriptAgent", data: payload, createTime: Date.now(), updateTime: Date.now() });
+  }
+}
+async function persistScriptPlanDataFromResponse(projectId, fullResponse) {
+  const skeletons = extractXmlTags(fullResponse, "storySkeleton");
+  const strategies = extractXmlTags(fullResponse, "adaptationStrategy");
+  const scripts = extractXmlTags(fullResponse, "scriptItem");
+  const patch = {};
+  const skeleton = skeletons.length ? skeletons[skeletons.length - 1].content : void 0;
+  const strategy = strategies.length ? strategies[strategies.length - 1].content : void 0;
+  const scriptItems = scripts.map((s) => ({ name: s.attrs.name ?? "", content: s.content })).filter((s) => s.name && s.content);
+  if (skeleton) patch.storySkeleton = skeleton;
+  if (strategy) patch.adaptationStrategy = strategy;
+  if (scriptItems.length) patch.script = scriptItems;
+  if (patch.storySkeleton !== void 0 || patch.adaptationStrategy !== void 0 || patch.script !== void 0) {
+    await mergeScriptPlanData(projectId, patch);
+  }
+  return patch;
+}
+async function mergeProductionTextFields(projectId, episodesId, patch) {
+  const row = await utils_default.db("o_agentWorkData").where({ projectId: String(projectId), episodesId: String(episodesId), key: "productionAgent" }).first();
+  let data = {};
+  if (row?.data) {
+    try {
+      data = JSON.parse(row.data);
+    } catch {
+      data = {};
+    }
+  }
+  if (patch.script !== void 0) data.script = patch.script;
+  if (patch.scriptPlan !== void 0) data.scriptPlan = patch.scriptPlan;
+  if (patch.storyboardTable !== void 0) data.storyboardTable = patch.storyboardTable;
+  const payload = JSON.stringify(data);
+  if (row) {
+    await utils_default.db("o_agentWorkData").where({ id: row.id }).update({ data: payload, updateTime: Date.now() });
+  } else {
+    await utils_default.db("o_agentWorkData").insert({
+      projectId,
+      episodesId,
+      key: "productionAgent",
+      data: payload,
+      createTime: Date.now(),
+      updateTime: Date.now()
+    });
+  }
+}
+async function persistProductionTextFromResponse(projectId, episodesId, fullResponse) {
+  const plans = extractXmlTags(fullResponse, "scriptPlan");
+  const tables = extractXmlTags(fullResponse, "storyboardTable");
+  const patch = {};
+  if (plans.length) patch.scriptPlan = plans[plans.length - 1].content;
+  if (tables.length) patch.storyboardTable = tables[tables.length - 1].content;
+  if (patch.scriptPlan !== void 0 || patch.storyboardTable !== void 0) {
+    await mergeProductionTextFields(projectId, episodesId, patch);
+  }
+  return patch;
+}
+
 // src/utils/agent/skillsTools.ts
 init_zod();
 init_dist22();
@@ -257539,6 +257691,11 @@ async function createSubAgent(parentCtx) {
       tools: { ...extraTools, ...tools_default({ resTool, msg: subMsg }) }
     });
     const fullResponse = await consumeFullStream(fullStream, subMsg);
+    if (fullResponse.trim() && !abortSignal?.aborted) {
+      await persistProductionTextFromResponse(resTool.data.projectId, resTool.data.scriptId, fullResponse).catch(
+        (e) => console.error("[productionAgent] \u5DE5\u4F5C\u533A\u6587\u672C\u5B57\u6BB5\u843D\u5E93\u5931\u8D25:", utils_default.error(e).message)
+      );
+    }
     if (fullResponse.trim()) {
       await memory.add(memoryKey, removeAllXmlTags(fullResponse), {
         name: name28,
@@ -258562,12 +258719,20 @@ var tools_default2 = (toolCpnfig) => {
       execute: async ({ key }) => {
         console.log("[tools] get_planData", key);
         const thinking = msg.thinking(`\u6B63\u5728\u83B7\u53D6${planDataKeyLabels[key]}\u5DE5\u4F5C\u533A\u6570\u636E...`);
-        const planData2 = await new Promise((resolve3) => socket.emit("getPlanData", { key }, (res) => resolve3(res)));
+        const row = await utils_default.db("o_agentWorkData").where({ projectId: resTool.data.projectId, key: "scriptAgent" }).first();
+        const data = row?.data ? JSON.parse(row.data) : {};
+        let value;
+        if (key === "script") {
+          const scripts = await utils_default.db("o_script").where({ projectId: resTool.data.projectId }).select("id", "name", "content");
+          value = scripts.length ? scripts.map((s) => `<scriptItem name="${s.name}">${s.content}</scriptItem>`).join("\n") : "";
+        } else {
+          value = data[key] ?? "";
+        }
         thinking.appendText(`\u83B7\u53D6\u5230${planDataKeyLabels[key]}:
-` + planData2[key]);
+` + (value || "\u65E0\u6570\u636E"));
         thinking.updateTitle(`\u83B7\u53D6${planDataKeyLabels[key]}\u5B8C\u6210`);
         thinking.complete();
-        return planData2[key] ?? "\u65E0\u6570\u636E";
+        return value || "\u65E0\u6570\u636E";
       }
     }),
     get_novel_text: tool({
@@ -258680,6 +258845,80 @@ async function runDecisionAI2(ctx) {
 function createSubAgent2(parentCtx) {
   const { resTool, abortSignal } = parentCtx;
   const memory = new memory_default("scriptAgent", parentCtx.isolationKey);
+  async function persistFromResponse(subMsg, fullResponse) {
+    const thinking = subMsg.thinking("\u6B63\u5728\u4FDD\u5B58\u5DE5\u4F5C\u533A\u6570\u636E...");
+    try {
+      const patch = await persistScriptPlanDataFromResponse(resTool.data.projectId, fullResponse);
+      const savedKeys = Object.keys(patch);
+      if (savedKeys.length > 0) {
+        thinking.appendText(`\u5DF2\u4FDD\u5B58\u5DE5\u4F5C\u533A\u5B57\u6BB5: ${savedKeys.join(", ")}`);
+        thinking.updateTitle("\u5DE5\u4F5C\u533A\u6570\u636E\u5DF2\u4FDD\u5B58");
+      } else {
+        thinking.updateTitle("\u672A\u68C0\u6D4B\u5230\u5DE5\u4F5C\u533A\u6570\u636E\u6807\u7B7E");
+      }
+      thinking.complete();
+      return patch;
+    } catch (e) {
+      thinking.appendText(`\u5DE5\u4F5C\u533A\u6570\u636E\u4FDD\u5B58\u5931\u8D25: ${utils_default.error(e).message}`);
+      thinking.updateTitle("\u5DE5\u4F5C\u533A\u6570\u636E\u4FDD\u5B58\u5931\u8D25");
+      thinking.error();
+      throw e;
+    }
+  }
+  async function repairMissingTags(subMsg, key, label, tag, prompt, fullResponse) {
+    const thinking = subMsg.thinking(`\u68C0\u6D4B\u5230${label}\u5185\u5BB9\u672A\u6309XML\u683C\u5F0F\u8F93\u51FA\uFF0C\u6B63\u5728\u8865\u5199\u683C\u5F0F...`);
+    const isScript = tag === "scriptItem";
+    const formatSpec = isScript ? `<${tag} name="\u5267\u672C\u540D\u79F0">\u5267\u672C\u5185\u5BB9</${tag}>` : `<${tag}>${label}\u5185\u5BB9</${tag}>`;
+    const extractRe = isScript ? new RegExp(`<${tag}(\\s[^>]*)?>([\\s\\S]*?)</${tag}>`) : new RegExp(`<${tag}>([\\s\\S]*?)</${tag}>`);
+    try {
+      const { text: text2 } = await utils_default.Ai.Text(key).invoke({
+        system: `\u4F60\u4E4B\u524D\u7684\u56DE\u590D\u5185\u5BB9\u5B8C\u6574\uFF0C\u4F46\u7F3A\u5C11\u5FC5\u9700\u7684XML\u6807\u7B7E\u683C\u5F0F\u3002\u8BF7\u628A\u8BE5\u5185\u5BB9\u539F\u6837\u5957\u4E0AXML\u6807\u7B7E\u8F93\u51FA\uFF0C\u4E0D\u8981\u589E\u5220\u6216\u6539\u5199\u4EFB\u4F55\u5185\u5BB9\uFF0C\u4E0D\u8981\u8F93\u51FA\u5176\u4ED6\u4EFB\u4F55\u6587\u5B57\u3002${isScript ? "name \u5C5E\u6027\u53D6\u5267\u672C\u6587\u4EF6\u5934\u9996\u884C\u6807\u9898\uFF08\u4E0D\u542B#\uFF09\u3002" : ""}\u8F93\u51FA\u683C\u5F0F\uFF1A
+${formatSpec}`,
+        messages: [{ role: "user", content: `\u4EFB\u52A1\uFF1A${prompt}
+
+\u4F60\u4E4B\u524D\u7684\u56DE\u590D\uFF1A
+${fullResponse}` }]
+      });
+      const repaired = text2.trim();
+      const extracted = repaired.match(extractRe);
+      const content = isScript ? extracted?.[2] : extracted?.[1];
+      if (extracted && content && content.trim().length > 0) {
+        thinking.appendText(`\u683C\u5F0F\u8865\u5199\u6210\u529F\uFF0C${label}\u957F\u5EA6: ${content.trim().length}`);
+        thinking.updateTitle(`${label}\u683C\u5F0F\u5DF2\u8865\u5199`);
+        thinking.complete();
+        return isScript ? `<${tag}${extracted[1] ?? ""}>${content.trim()}</${tag}>` : content.trim();
+      }
+      thinking.appendText("\u683C\u5F0F\u8865\u5199\u672A\u80FD\u63D0\u53D6\u5230\u5185\u5BB9");
+      thinking.updateTitle(`${label}\u683C\u5F0F\u8865\u5199\u5931\u8D25`);
+      thinking.complete();
+      return null;
+    } catch (e) {
+      thinking.appendText(`\u683C\u5F0F\u8865\u5199\u51FA\u9519: ${utils_default.error(e).message}`);
+      thinking.updateTitle(`${label}\u683C\u5F0F\u8865\u5199\u51FA\u9519`);
+      thinking.complete();
+      return null;
+    }
+  }
+  async function fallbackSave(subMsg, label, field, fullResponse) {
+    let content = fullResponse.trim();
+    content = content.replace(/(故事骨架|改编策略)已保存，请在右侧工作台查看。\s*$/, "").replace(/\n[-—]{2,}\s*$/, "").replace(/\n{2,}$/, "").trim();
+    if (content.length < 50) return false;
+    const thinking = subMsg.thinking(`\u6B63\u5728\u4EE5\u515C\u5E95\u65B9\u5F0F\u4FDD\u5B58${label}...`);
+    try {
+      await mergeScriptPlanData(resTool.data.projectId, { [field]: content });
+      thinking.appendText(
+        `\u26A0\uFE0F ${label}\u672A\u6309XML\u683C\u5F0F\u8F93\u51FA\u4E14\u8865\u5199\u5931\u8D25\uFF0C\u5DF2\u5C06\u6B63\u6587\u76F4\u63A5\u5B58\u5165\u5DE5\u4F5C\u533A\uFF08\u957F\u5EA6 ${content.length}\uFF09\u3002\u5185\u5BB9\u5F00\u5934\u53EF\u80FD\u5305\u542B\u5C11\u91CF\u8BF4\u660E\u6587\u5B57\uFF0C\u5EFA\u8BAE\u5728\u5DE5\u4F5C\u53F0\u68C0\u67E5\u5E76\u5FAE\u8C03\u3002`
+      );
+      thinking.updateTitle(`${label}\u5DF2\u515C\u5E95\u4FDD\u5B58\uFF08\u5EFA\u8BAE\u68C0\u67E5\uFF09`);
+      thinking.complete();
+      return true;
+    } catch (e) {
+      thinking.appendText(`\u515C\u5E95\u4FDD\u5B58\u5931\u8D25: ${utils_default.error(e).message}`);
+      thinking.updateTitle(`${label}\u515C\u5E95\u4FDD\u5B58\u5931\u8D25`);
+      thinking.error();
+      return false;
+    }
+  }
   async function runAgent({
     key,
     prompt,
@@ -258687,7 +258926,8 @@ function createSubAgent2(parentCtx) {
     name: name28,
     memoryKey,
     tools: extraTools,
-    messages
+    messages,
+    workTag
   }) {
     parentCtx.msg.complete();
     const subMsg = resTool.newMessage("assistant", name28);
@@ -258698,6 +258938,35 @@ function createSubAgent2(parentCtx) {
       tools: { ...extraTools, ...tools_default2({ resTool, msg: subMsg }) }
     });
     const fullResponse = await consumeFullStream2(fullStream, subMsg);
+    if (fullResponse.trim() && !abortSignal?.aborted) {
+      const patch = await persistFromResponse(subMsg, fullResponse).catch(() => null);
+      if (workTag) {
+        const tagSaved = patch?.[workTag.field];
+        if (!tagSaved) {
+          const repaired = await repairMissingTags(subMsg, key, workTag.label, workTag.tag, prompt, fullResponse);
+          if (repaired) {
+            if (workTag.field === "script") {
+              await persistScriptPlanDataFromResponse(resTool.data.projectId, repaired).catch(
+                (e) => console.error("[scriptAgent] \u8865\u5199\u5267\u672C\u843D\u5E93\u5931\u8D25:", utils_default.error(e).message)
+              );
+            } else {
+              await mergeScriptPlanData(resTool.data.projectId, { [workTag.field]: repaired }).catch(
+                (e) => console.error("[scriptAgent] \u8865\u5199\u5185\u5BB9\u843D\u5E93\u5931\u8D25:", utils_default.error(e).message)
+              );
+            }
+          } else if (workTag.field === "script") {
+            const warn = subMsg.thinking("\u5267\u672C\u683C\u5F0F\u8865\u5199\u5931\u8D25");
+            warn.appendText(
+              `\u26A0\uFE0F \u672C\u6B21\u5267\u672C\u5185\u5BB9\u672A\u5305\u542B <scriptItem name="..."> \u6807\u7B7E\u4E14\u683C\u5F0F\u8865\u5199\u5931\u8D25\uFF0C\u5185\u5BB9\u672A\u5199\u5165\u5267\u672C\u5E93\u3002\u5B8C\u6574\u5185\u5BB9\u5DF2\u5728\u5BF9\u8BDD\u6D41\u4E2D\uFF0C\u8BF7\u8BA9Agent\u91CD\u65B0\u8F93\u51FA\uFF08\u6216\u590D\u5236\u4FDD\u5B58\uFF09\u3002`
+            );
+            warn.updateTitle("\u5267\u672C\u672A\u4FDD\u5B58\uFF08\u683C\u5F0F\u5F02\u5E38\uFF09");
+            warn.complete();
+          } else {
+            await fallbackSave(subMsg, workTag.label, workTag.field, fullResponse).catch(() => null);
+          }
+        }
+      }
+    }
     if (fullResponse.trim()) {
       await memory.add(memoryKey, removeAllXmlTags2(fullResponse), {
         name: name28,
@@ -258723,7 +258992,8 @@ function createSubAgent2(parentCtx) {
         system: systemPrompt + formatPrompt,
         name: "\u7F16\u5267",
         memoryKey: "assistant:execution:storySkeleton",
-        messages: [{ role: "user", content: prompt + formatPrompt }]
+        messages: [{ role: "user", content: prompt + formatPrompt }],
+        workTag: { tag: "storySkeleton", field: "storySkeleton", label: "\u6545\u4E8B\u9AA8\u67B6" }
       });
     }
   });
@@ -258740,7 +259010,8 @@ function createSubAgent2(parentCtx) {
         system: systemPrompt + formatPrompt,
         name: "\u7F16\u5267",
         memoryKey: "assistant:execution:adaptationStrategy",
-        messages: [{ role: "user", content: prompt + formatPrompt }]
+        messages: [{ role: "user", content: prompt + formatPrompt }],
+        workTag: { tag: "adaptationStrategy", field: "adaptationStrategy", label: "\u6539\u7F16\u7B56\u7565" }
       });
     }
   });
@@ -258767,7 +259038,8 @@ XML\u4E0D\u5F97\u6DFB\u52A0\u4EFB\u4F55\u989D\u5916\u6807\u7B7E<scriptItem name=
           { role: "user", content: prompt + formatPrompt }
         ],
         name: "\u7F16\u5267",
-        memoryKey: "assistant:execution:script"
+        memoryKey: "assistant:execution:script",
+        workTag: { tag: "scriptItem", field: "script", label: "\u5267\u672C" }
       });
     }
   });
