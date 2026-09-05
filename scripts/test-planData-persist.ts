@@ -14,13 +14,16 @@ import u from "../src/utils";
 import { persistScriptPlanDataFromResponse, persistProductionTextFromResponse } from "../src/utils/agent/planData";
 
 async function main() {
-  const testProjectId = 999000001; // 测试专用，结束后清理
+  // 测试专用项目ID（记忆清理必须用精确匹配 IN 列表，禁止范围删除——
+  // 真实项目ID是13位时间戳(≈1.79万亿)远大于 999000001，范围删除会误删真实数据）
+  const testProjectIds = [999000001, 999000002];
+  const testProjectId = testProjectIds[0];
   let passed = 0;
   let failed = 0;
 
   async function cleanup() {
-    await u.db("o_agentWorkData").where("projectId", ">=", 999000001).del();
-    await u.db("o_script").where("projectId", testProjectId).del();
+    await u.db("o_agentWorkData").whereIn("projectId", testProjectIds).del();
+    await u.db("o_script").whereIn("projectId", testProjectIds).del();
   }
   await cleanup();
 
@@ -58,13 +61,13 @@ async function main() {
   // ── T4: setPlanData 行不存在时自动插入（需启动服务+token，见 T4b 说明）──
   // 直接调用 mergeScriptPlanData 等价验证插入路径（路由内部即调用此逻辑）
   {
-    await u.db("o_agentWorkData").where("projectId", testProjectId + 1).del();
-    await persistScriptPlanDataFromResponse(testProjectId + 1, "<storySkeleton>函数插入的骨架</storySkeleton>");
-    const row = await u.db("o_agentWorkData").where({ projectId: testProjectId + 1, key: "scriptAgent" }).first();
+    await u.db("o_agentWorkData").where("projectId", testProjectIds[1]).del();
+    await persistScriptPlanDataFromResponse(testProjectIds[1], "<storySkeleton>函数插入的骨架</storySkeleton>");
+    const row = await u.db("o_agentWorkData").where({ projectId: testProjectIds[1], key: "scriptAgent" }).first();
     const ok = !!row?.data && JSON.parse(row.data).storySkeleton === "函数插入的骨架";
     ok ? passed++ : failed++;
     console.log(`[T4 自动插入缺失行] ${ok ? "✅" : "❌"} row=${row ? "已插入" : "未插入"}`);
-    await u.db("o_agentWorkData").where("projectId", testProjectId + 1).del();
+    await u.db("o_agentWorkData").where("projectId", testProjectIds[1]).del();
   }
 
   // ── T5: scriptItem 落库到 o_script ──
