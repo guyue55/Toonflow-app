@@ -4,6 +4,7 @@ import { z } from "zod";
 import u from "@/utils";
 import Memory from "@/utils/agent/memory";
 import { persistScriptPlanDataFromResponse, mergeScriptPlanData } from "@/utils/agent/planData";
+import { extractXmlTags } from "@/utils/agent/xmlTags";
 import useTools from "@/agents/scriptAgent/tools";
 import ResTool from "@/socket/resTool";
 import * as fs from "fs";
@@ -133,27 +134,24 @@ function createSubAgent(parentCtx: AgentContext) {
     fullResponse: string,
   ): Promise<string | null> {
     const thinking = subMsg.thinking(`检测到${label}内容未按XML格式输出，正在补写格式...`);
-    // scriptItem 需要 name 属性；单值标签（骨架/策略）不带属性
+    // scriptItem 需要 name 属性，且多集剧本每集一对标签；单值标签（骨架/策略）不带属性
     const isScript = tag === "scriptItem";
     const formatSpec = isScript
-      ? `<${tag} name="剧本名称">剧本内容</${tag}>`
+      ? `<${tag} name="剧本名称">剧本内容</${tag}>（每集剧本一对标签）`
       : `<${tag}>${label}内容</${tag}>`;
-    const extractRe = isScript
-      ? new RegExp(`<${tag}(\\s[^>]*)?>([\\s\\S]*?)</${tag}>`)
-      : new RegExp(`<${tag}>([\\s\\S]*?)</${tag}>`);
+    const extractRe = new RegExp(`<${tag}(\\s[^>]*)?>[\\s\\S]*?</${tag}>`);
     try {
       const { text } = await u.Ai.Text(key as any).invoke({
-        system: `你之前的回复内容完整，但缺少必需的XML标签格式。请把该内容原样套上XML标签输出，不要增删或改写任何内容，不要输出其他任何文字。${isScript ? "name 属性取剧本文件头首行标题（不含#）。" : ""}输出格式：\n${formatSpec}`,
+        system: `你之前的回复内容完整，但缺少必需的XML标签格式。请把该内容原样套上XML标签输出，不要增删或改写任何内容，不要输出其他任何文字。${isScript ? "每集剧本各用一对标签包裹，name 属性取该集文件头首行标题（不含#）。" : ""}输出格式：\n${formatSpec}`,
         messages: [{ role: "user", content: `任务：${prompt}\n\n你之前的回复：\n${fullResponse}` }],
       });
       const repaired = text.trim();
-      const extracted = repaired.match(extractRe);
-      const content = isScript ? extracted?.[2] : extracted?.[1];
-      if (extracted && content && content.trim().length > 0) {
-        thinking.appendText(`格式补写成功，${label}长度: ${content.trim().length}`);
+      if (extractRe.test(repaired)) {
+        // 返回补写全文（可能含多集多个标签对），落库由调用方统一走 extractXmlTags 解析
+        thinking.appendText(`格式补写成功，${label}长度: ${repaired.length}`);
         thinking.updateTitle(`${label}格式已补写`);
         thinking.complete();
-        return isScript ? `<${tag}${extracted[1] ?? ""}>${content.trim()}</${tag}>` : content.trim();
+        return repaired;
       }
       thinking.appendText("格式补写未能提取到内容");
       thinking.updateTitle(`${label}格式补写失败`);
@@ -245,15 +243,36 @@ function createSubAgent(parentCtx: AgentContext) {
         if (!tagSaved) {
           const repaired = await repairMissingTags(subMsg, key, workTag.label, workTag.tag, prompt, fullResponse);
           if (repaired) {
+            // 补写产物是含标签的全文：剧本走通用解析（支持多集多标签对），
+            // 单值字段（骨架/策略）取最后一对标签的纯内容
             if (workTag.field === "script") {
-              // 剧本补写产物：一个或多个 scriptItem，走通用落库（写 o_script 表）
-              await persistScriptPlanDataFromResponse(resTool.data.projectId, repaired).catch((e) =>
-                console.error("[scriptAgent] 补写剧本落库失败:", u.error(e).message),
-              );
+              const repairedPatch = await persistScriptPlanDataFromResponse(resTool.data.projectId, repaired).catch((e) => {
+                console.error("[scriptAgent] 补写剧本落库失败:", u.error(e).message);
+                return null;
+              });
+              if (repairedPatch?.script?.length) {
+                const t = subMsg.thinking("剧本已补写落库");
+                t.appendText(`已通过格式补写保存 ${repairedPatch.script.length} 集剧本。`);
+                t.updateTitle("剧本已保存（补写）");
+                t.complete();
+              } else {
+                const warn = subMsg.thinking("剧本补写解析失败");
+                warn.appendText(
+                  `⚠️ 补写产物中未解析到有效的 scriptItem，内容未写入剧本库。完整内容已在对话流中，请让Agent重新输出（或复制保存）。`,
+                );
+                warn.updateTitle("剧本未保存（补写解析失败）");
+                warn.complete();
+              }
             } else {
-              await mergeScriptPlanData(resTool.data.projectId, { [workTag.field]: repaired } as any).catch((e) =>
-                console.error("[scriptAgent] 补写内容落库失败:", u.error(e).message),
-              );
+              const tags = extractXmlTags(repaired, workTag.tag);
+              const content = tags.length ? tags[tags.length - 1].content : null;
+              if (content) {
+                await mergeScriptPlanData(resTool.data.projectId, { [workTag.field]: content } as any).catch((e) =>
+                  console.error("[scriptAgent] 补写内容落库失败:", u.error(e).message),
+                );
+              } else {
+                console.error("[scriptAgent] 补写产物解析不到标签内容:", repaired.slice(0, 200));
+              }
             }
           }
           // 剧本不做正文兜底：多集内容无 name 边界，错误拆分比不保存更糟；
