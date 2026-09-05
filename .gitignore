@@ -56,3 +56,10 @@ database.d.ts
 data/oss/*
 data/test.sqlite
 version.txt
+
+# 数据库备份
+*.sqlite.bak*
+data/db2.sqlite.bak*
+
+# Serena 工具目录
+.serena/
