@@ -129,7 +129,8 @@ async function createSubAgent(parentCtx: AgentContext) {
 
     // 服务端兜底落库纯文本字段（scriptPlan/storyboardTable）。
     // 前端正常解析保存时这里写入相同内容，幂等；前端断开或模型丢格式时是唯一落库通道。
-    if (fullResponse.trim() && !abortSignal?.aborted) {
+    // scriptId（即 episodesId）缺失时不落库，避免插入 episodesId 为空的脏行。
+    if (fullResponse.trim() && !abortSignal?.aborted && resTool.data.scriptId != null) {
       await persistProductionTextFromResponse(resTool.data.projectId, resTool.data.scriptId, fullResponse).catch((e) =>
         console.error("[productionAgent] 工作区文本字段落库失败:", u.error(e).message),
       );
