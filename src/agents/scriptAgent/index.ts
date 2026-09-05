@@ -3,6 +3,7 @@ import { tool, jsonSchema } from "ai";
 import { z } from "zod";
 import u from "@/utils";
 import Memory from "@/utils/agent/memory";
+import { persistScriptPlanDataFromResponse, mergeScriptPlanData } from "@/utils/agent/planData";
 import useTools from "@/agents/scriptAgent/tools";
 import ResTool from "@/socket/resTool";
 import * as fs from "fs";
@@ -92,6 +93,116 @@ function createSubAgent(parentCtx: AgentContext) {
   const { resTool, abortSignal } = parentCtx;
   const memory = new Memory("scriptAgent", parentCtx.isolationKey);
 
+  /**
+   * 服务端兜底：解析子Agent回复中的工作区XML标签并落库。
+   * 正常情况下前端解析标签后已保存，这里合并写入相同内容，幂等无害；
+   * 若模型丢掉XML格式导致前端没保存，这里就是唯一的落库通道。
+   * 返回解析到的字段，供调用方判断是否触发格式补写重试。
+   */
+  async function persistFromResponse(subMsg: ReturnType<ResTool["newMessage"]>, fullResponse: string) {
+    const thinking = subMsg.thinking("正在保存工作区数据...");
+    try {
+      const patch = await persistScriptPlanDataFromResponse(resTool.data.projectId, fullResponse);
+      const savedKeys = Object.keys(patch);
+      if (savedKeys.length > 0) {
+        thinking.appendText(`已保存工作区字段: ${savedKeys.join(", ")}`);
+        thinking.updateTitle("工作区数据已保存");
+      } else {
+        thinking.updateTitle("未检测到工作区数据标签");
+      }
+      thinking.complete();
+      return patch;
+    } catch (e) {
+      thinking.appendText(`工作区数据保存失败: ${u.error(e).message}`);
+      thinking.updateTitle("工作区数据保存失败");
+      thinking.error();
+      throw e;
+    }
+  }
+
+  /**
+   * 格式补写重试：模型回复完整但丢失了XML标签时，用非流式补写请求
+   * 让模型仅输出标签内容。成本低（无工具、无思考），内容已有，只是重排版。
+   */
+  async function repairMissingTags(
+    subMsg: ReturnType<ResTool["newMessage"]>,
+    key: string,
+    label: string,
+    tag: string,
+    prompt: string,
+    fullResponse: string,
+  ): Promise<string | null> {
+    const thinking = subMsg.thinking(`检测到${label}内容未按XML格式输出，正在补写格式...`);
+    // scriptItem 需要 name 属性；单值标签（骨架/策略）不带属性
+    const isScript = tag === "scriptItem";
+    const formatSpec = isScript
+      ? `<${tag} name="剧本名称">剧本内容</${tag}>`
+      : `<${tag}>${label}内容</${tag}>`;
+    const extractRe = isScript
+      ? new RegExp(`<${tag}(\\s[^>]*)?>([\\s\\S]*?)</${tag}>`)
+      : new RegExp(`<${tag}>([\\s\\S]*?)</${tag}>`);
+    try {
+      const { text } = await u.Ai.Text(key as any).invoke({
+        system: `你之前的回复内容完整，但缺少必需的XML标签格式。请把该内容原样套上XML标签输出，不要增删或改写任何内容，不要输出其他任何文字。${isScript ? "name 属性取剧本文件头首行标题（不含#）。" : ""}输出格式：\n${formatSpec}`,
+        messages: [{ role: "user", content: `任务：${prompt}\n\n你之前的回复：\n${fullResponse}` }],
+      });
+      const repaired = text.trim();
+      const extracted = repaired.match(extractRe);
+      const content = isScript ? extracted?.[2] : extracted?.[1];
+      if (extracted && content && content.trim().length > 0) {
+        thinking.appendText(`格式补写成功，${label}长度: ${content.trim().length}`);
+        thinking.updateTitle(`${label}格式已补写`);
+        thinking.complete();
+        return isScript ? `<${tag}${extracted[1] ?? ""}>${content.trim()}</${tag}>` : content.trim();
+      }
+      thinking.appendText("格式补写未能提取到内容");
+      thinking.updateTitle(`${label}格式补写失败`);
+      thinking.complete();
+      return null;
+    } catch (e) {
+      thinking.appendText(`格式补写出错: ${u.error(e).message}`);
+      thinking.updateTitle(`${label}格式补写出错`);
+      thinking.complete();
+      return null;
+    }
+  }
+
+  /**
+   * 兜底保存：格式补写也失败时，直接把模型正文（剥掉尾部确认话术和空段）
+   * 存入工作区，避免内容彻底丢失。宁可存"可能带杂质的完整内容"也不要空白。
+   */
+  async function fallbackSave(
+    subMsg: ReturnType<ResTool["newMessage"]>,
+    label: string,
+    field: "storySkeleton" | "adaptationStrategy",
+    fullResponse: string,
+  ): Promise<boolean> {
+    let content = fullResponse.trim();
+    // 去掉尾部可能的确认话术（skill 要求的固定格式）与收尾分隔线
+    content = content
+      .replace(/(故事骨架|改编策略)已保存，请在右侧工作台查看。\s*$/, "")
+      .replace(/\n[-—]{2,}\s*$/, "")
+      .replace(/\n{2,}$/, "")
+      .trim();
+    if (content.length < 50) return false;
+
+    const thinking = subMsg.thinking(`正在以兜底方式保存${label}...`);
+    try {
+      await mergeScriptPlanData(resTool.data.projectId, { [field]: content });
+      thinking.appendText(
+        `⚠️ ${label}未按XML格式输出且补写失败，已将正文直接存入工作区（长度 ${content.length}）。内容开头可能包含少量说明文字，建议在工作台检查并微调。`,
+      );
+      thinking.updateTitle(`${label}已兜底保存（建议检查）`);
+      thinking.complete();
+      return true;
+    } catch (e) {
+      thinking.appendText(`兜底保存失败: ${u.error(e).message}`);
+      thinking.updateTitle(`${label}兜底保存失败`);
+      thinking.error();
+      return false;
+    }
+  }
+
   async function runAgent({
     key,
     prompt,
@@ -100,6 +211,7 @@ function createSubAgent(parentCtx: AgentContext) {
     memoryKey,
     tools: extraTools,
     messages,
+    workTag,
   }: {
     key: `${string}:${string}`;
     prompt: string;
@@ -108,6 +220,8 @@ function createSubAgent(parentCtx: AgentContext) {
     memoryKey: string;
     tools?: Record<string, any>;
     messages?: { role: "user" | "assistant" | "system"; content: string }[];
+    /** 本子Agent需要写入工作区的XML标签及落库字段（script 表示剧本 scriptItem，落 o_script 表） */
+    workTag?: { tag: string; field: "storySkeleton" | "adaptationStrategy" | "script"; label: string };
   }) {
     parentCtx.msg.complete();
     const subMsg = resTool.newMessage("assistant", name);
@@ -120,6 +234,43 @@ function createSubAgent(parentCtx: AgentContext) {
     });
 
     const fullResponse = await consumeFullStream(fullStream, subMsg);
+
+    // ── 服务端落库：XML正常 → 合并保存；缺失 → 补写重试；仍失败 → 兜底存正文 ──
+    // 所有子Agent都跑通用解析落库（含 scriptItem → o_script 表）；
+    // workTag 仅决定"单值字段"（骨架/策略）缺失时是否触发格式补写与兜底。
+    if (fullResponse.trim() && !abortSignal?.aborted) {
+      const patch = await persistFromResponse(subMsg, fullResponse).catch(() => null);
+      if (workTag) {
+        const tagSaved = (patch as any)?.[workTag.field];
+        if (!tagSaved) {
+          const repaired = await repairMissingTags(subMsg, key, workTag.label, workTag.tag, prompt, fullResponse);
+          if (repaired) {
+            if (workTag.field === "script") {
+              // 剧本补写产物：一个或多个 scriptItem，走通用落库（写 o_script 表）
+              await persistScriptPlanDataFromResponse(resTool.data.projectId, repaired).catch((e) =>
+                console.error("[scriptAgent] 补写剧本落库失败:", u.error(e).message),
+              );
+            } else {
+              await mergeScriptPlanData(resTool.data.projectId, { [workTag.field]: repaired } as any).catch((e) =>
+                console.error("[scriptAgent] 补写内容落库失败:", u.error(e).message),
+              );
+            }
+          }
+          // 剧本不做正文兜底：多集内容无 name 边界，错误拆分比不保存更糟；
+          // 补写失败时在 thinking 中明确警示
+          else if (workTag.field === "script") {
+            const warn = subMsg.thinking("剧本格式补写失败");
+            warn.appendText(
+              `⚠️ 本次剧本内容未包含 <scriptItem name="..."> 标签且格式补写失败，内容未写入剧本库。完整内容已在对话流中，请让Agent重新输出（或复制保存）。`,
+            );
+            warn.updateTitle("剧本未保存（格式异常）");
+            warn.complete();
+          } else {
+            await fallbackSave(subMsg, workTag.label, workTag.field, fullResponse).catch(() => null);
+          }
+        }
+      }
+    }
 
     if (fullResponse.trim()) {
       await memory.add(memoryKey, removeAllXmlTags(fullResponse), {
@@ -154,6 +305,7 @@ function createSubAgent(parentCtx: AgentContext) {
         name: "编剧",
         memoryKey: "assistant:execution:storySkeleton",
         messages: [{ role: "user", content: prompt + formatPrompt }],
+        workTag: { tag: "storySkeleton", field: "storySkeleton", label: "故事骨架" },
       });
     },
   });
@@ -174,6 +326,7 @@ function createSubAgent(parentCtx: AgentContext) {
         name: "编剧",
         memoryKey: "assistant:execution:adaptationStrategy",
         messages: [{ role: "user", content: prompt + formatPrompt }],
+        workTag: { tag: "adaptationStrategy", field: "adaptationStrategy", label: "改编策略" },
       });
     },
   });
@@ -204,6 +357,7 @@ function createSubAgent(parentCtx: AgentContext) {
         ],
         name: "编剧",
         memoryKey: "assistant:execution:script",
+        workTag: { tag: "scriptItem", field: "script", label: "剧本" },
       });
     },
   });
