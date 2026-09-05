@@ -3,6 +3,7 @@ import { z } from "zod";
 import { tool, jsonSchema } from "ai";
 import u from "@/utils";
 import Memory from "@/utils/agent/memory";
+import { persistProductionTextFromResponse } from "@/utils/agent/planData";
 import { createSkillTools, parseFrontmatter, scanSkills, useSkill } from "@/utils/agent/skillsTools";
 import useTools from "@/agents/productionAgent/tools";
 import ResTool from "@/socket/resTool";
@@ -125,6 +126,14 @@ async function createSubAgent(parentCtx: AgentContext) {
     });
 
     const fullResponse = await consumeFullStream(fullStream, subMsg);
+
+    // 服务端兜底落库纯文本字段（scriptPlan/storyboardTable）。
+    // 前端正常解析保存时这里写入相同内容，幂等；前端断开或模型丢格式时是唯一落库通道。
+    if (fullResponse.trim() && !abortSignal?.aborted) {
+      await persistProductionTextFromResponse(resTool.data.projectId, resTool.data.scriptId, fullResponse).catch((e) =>
+        console.error("[productionAgent] 工作区文本字段落库失败:", u.error(e).message),
+      );
+    }
 
     if (fullResponse.trim()) {
       await memory.add(memoryKey, removeAllXmlTags(fullResponse), {
