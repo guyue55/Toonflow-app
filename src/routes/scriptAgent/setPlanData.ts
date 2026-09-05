@@ -17,12 +17,41 @@ export default router.post(
   }),
   async (req, res) => {
     const { projectId, agentType, data } = req.body;
-    await u
-      .db("o_agentWorkData")
-      .where({ projectId: projectId, key: agentType })
-      .update({
+    // 行不存在时 update 会静默无效（返回 200 但没写入），先补行再更新
+    const existing = await u.db("o_agentWorkData").where({ projectId: projectId, key: agentType }).first();
+    if (!existing) {
+      await u.db("o_agentWorkData").insert({
+        projectId: projectId,
+        key: agentType,
         data: JSON.stringify(data),
+        createTime: Date.now(),
+        updateTime: Date.now(),
       });
+    } else {
+      // 防覆盖保护：前端页面在后台仍会自动保存其内存态，若其内存态为空
+      // （如模型丢XML格式导致前端从未收到内容），会反复把空值写回，
+      // 清掉服务端已兜底保存/恢复的数据。因此空字符串不覆盖已有非空值。
+      const current: Record<string, any> = (() => {
+        try {
+          return JSON.parse(existing.data ?? "{}");
+        } catch {
+          return {};
+        }
+      })();
+      const safeData = { ...data };
+      for (const k of ["storySkeleton", "adaptationStrategy"]) {
+        if (typeof safeData[k] === "string" && safeData[k].trim() === "" && typeof current[k] === "string" && current[k].trim() !== "") {
+          safeData[k] = current[k];
+        }
+      }
+      await u.db("o_agentWorkData").where({ id: existing.id }).update({
+        data: JSON.stringify(safeData),
+        updateTime: Date.now(),
+      });
+      // 下发实际保存的数据（含保护结果），前端可据此校正本地状态
+      res.status(200).send(success({ data: safeData }));
+      return;
+    }
 
     const rawScript = data?.script;
     if (Array.isArray(rawScript) && rawScript.length > 0) {
