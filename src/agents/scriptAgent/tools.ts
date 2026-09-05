@@ -68,11 +68,22 @@ export default (toolCpnfig: ToolConfig) => {
       execute: async ({ key }) => {
         console.log("[tools] get_planData", key);
         const thinking = msg.thinking(`正在获取${planDataKeyLabels[key]}工作区数据...`);
-        const planData: planData = await new Promise((resolve) => socket.emit("getPlanData", { key }, (res: any) => resolve(res)));
-        thinking.appendText(`获取到${planDataKeyLabels[key]}:\n` + planData[key]);
+        // 服务端直接读库，不依赖前端socket回调（前端断开时回调永不返回）
+        const row = await u.db("o_agentWorkData").where({ projectId: resTool.data.projectId, key: "scriptAgent" }).first();
+        const data = row?.data ? JSON.parse(row.data) : {};
+        let value: string;
+        if (key === "script") {
+          const scripts = await u.db("o_script").where({ projectId: resTool.data.projectId }).select("id", "name", "content");
+          value = scripts.length
+            ? scripts.map((s: any) => `<scriptItem name="${s.name}">${s.content}</scriptItem>`).join("\n")
+            : "";
+        } else {
+          value = data[key] ?? "";
+        }
+        thinking.appendText(`获取到${planDataKeyLabels[key]}:\n` + (value || "无数据"));
         thinking.updateTitle(`获取${planDataKeyLabels[key]}完成`);
         thinking.complete();
-        return planData[key] ?? "无数据";
+        return value || "无数据";
       },
     }),
     get_novel_text: tool({
