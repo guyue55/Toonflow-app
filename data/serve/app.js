@@ -254237,36 +254237,34 @@ var init_setPlanData = __esm({
       async (req, res) => {
         const { projectId, agentType, data } = req.body;
         const existing = await utils_default.db("o_agentWorkData").where({ projectId, key: agentType }).first();
+        const current = (() => {
+          try {
+            return JSON.parse(existing?.data ?? "{}");
+          } catch {
+            return {};
+          }
+        })();
+        const safeData = { ...data };
+        for (const k of ["storySkeleton", "adaptationStrategy"]) {
+          if (typeof safeData[k] === "string" && safeData[k].trim() === "" && typeof current[k] === "string" && current[k].trim() !== "") {
+            safeData[k] = current[k];
+          }
+        }
         if (!existing) {
           await utils_default.db("o_agentWorkData").insert({
             projectId,
             key: agentType,
-            data: JSON.stringify(data),
+            data: JSON.stringify(safeData),
             createTime: Date.now(),
             updateTime: Date.now()
           });
         } else {
-          const current = (() => {
-            try {
-              return JSON.parse(existing.data ?? "{}");
-            } catch {
-              return {};
-            }
-          })();
-          const safeData = { ...data };
-          for (const k of ["storySkeleton", "adaptationStrategy"]) {
-            if (typeof safeData[k] === "string" && safeData[k].trim() === "" && typeof current[k] === "string" && current[k].trim() !== "") {
-              safeData[k] = current[k];
-            }
-          }
           await utils_default.db("o_agentWorkData").where({ id: existing.id }).update({
             data: JSON.stringify(safeData),
             updateTime: Date.now()
           });
-          res.status(200).send(success3({ data: safeData }));
-          return;
         }
-        const rawScript = data?.script;
+        const rawScript = safeData?.script ?? data?.script;
         if (Array.isArray(rawScript) && rawScript.length > 0) {
           const scriptMap = /* @__PURE__ */ new Map();
           for (const s of rawScript) {
@@ -254306,7 +254304,7 @@ var init_setPlanData = __esm({
             }
           }
         }
-        res.status(200).send(success3());
+        res.status(200).send(success3({ data: safeData }));
       }
     );
   }
@@ -257043,23 +257041,40 @@ function parseAttrs(attrStr) {
 }
 function extractXmlTags(text2, tag) {
   const results = [];
-  const tokenRe = new RegExp(`<(/?)${tag}(\\s[^>]*)?>`, "g");
-  const stack = [];
+  const closeTag = `</${tag}>`;
+  const openRe = new RegExp(`<${tag}(?=[\\s/>])([^>]*?)(/?)>`, "g");
+  const opens = [];
   let m;
-  while ((m = tokenRe.exec(text2)) !== null) {
-    const isClose = m[1] === "/";
-    if (!isClose) {
-      stack.push({ attrs: parseAttrs(m[2] ?? ""), start: m.index + m[0].length });
-    } else {
-      const open = stack.pop();
-      if (open) {
-        const content = text2.slice(open.start, m.index).trim();
-        const hasNested = new RegExp(`<${tag}(\\s[^>]*)?>`).test(content);
-        if (!hasNested) {
-          results.push({ attrs: open.attrs, content });
-        }
+  while ((m = openRe.exec(text2)) !== null) {
+    if (m[2] === "/") continue;
+    opens.push({ index: m.index, attrs: parseAttrs(m[1] ?? ""), end: m.index + m[0].length });
+  }
+  const stack = [];
+  let cursor = 0;
+  for (const open of opens) {
+    while (stack.length > 0) {
+      const nextClose = text2.indexOf(closeTag, cursor);
+      if (nextClose === -1 || nextClose > open.index) break;
+      const top = stack.pop();
+      const content = text2.slice(top.end, nextClose).trim();
+      const hasStrayOpen = new RegExp(`<${tag}(?=[\\s/>])`).test(content);
+      if (!hasStrayOpen) {
+        results.push({ attrs: top.attrs, content });
       }
+      cursor = nextClose + closeTag.length;
     }
+    stack.push(open);
+  }
+  while (stack.length > 0) {
+    const nextClose = text2.indexOf(closeTag, cursor);
+    if (nextClose === -1) break;
+    const top = stack.pop();
+    const content = text2.slice(top.end, nextClose).trim();
+    const hasStrayOpen = new RegExp(`<${tag}(?=[\\s/>])`).test(content);
+    if (!hasStrayOpen) {
+      results.push({ attrs: top.attrs, content });
+    }
+    cursor = nextClose + closeTag.length;
   }
   return results;
 }
@@ -257691,7 +257706,7 @@ async function createSubAgent(parentCtx) {
       tools: { ...extraTools, ...tools_default({ resTool, msg: subMsg }) }
     });
     const fullResponse = await consumeFullStream(fullStream, subMsg);
-    if (fullResponse.trim() && !abortSignal?.aborted) {
+    if (fullResponse.trim() && !abortSignal?.aborted && resTool.data.scriptId != null) {
       await persistProductionTextFromResponse(resTool.data.projectId, resTool.data.scriptId, fullResponse).catch(
         (e) => console.error("[productionAgent] \u5DE5\u4F5C\u533A\u6587\u672C\u5B57\u6BB5\u843D\u5E93\u5931\u8D25:", utils_default.error(e).message)
       );
@@ -258868,11 +258883,11 @@ function createSubAgent2(parentCtx) {
   async function repairMissingTags(subMsg, key, label, tag, prompt, fullResponse) {
     const thinking = subMsg.thinking(`\u68C0\u6D4B\u5230${label}\u5185\u5BB9\u672A\u6309XML\u683C\u5F0F\u8F93\u51FA\uFF0C\u6B63\u5728\u8865\u5199\u683C\u5F0F...`);
     const isScript = tag === "scriptItem";
-    const formatSpec = isScript ? `<${tag} name="\u5267\u672C\u540D\u79F0">\u5267\u672C\u5185\u5BB9</${tag}>` : `<${tag}>${label}\u5185\u5BB9</${tag}>`;
-    const extractRe = isScript ? new RegExp(`<${tag}(\\s[^>]*)?>([\\s\\S]*?)</${tag}>`) : new RegExp(`<${tag}>([\\s\\S]*?)</${tag}>`);
+    const formatSpec = isScript ? `<${tag} name="\u5267\u672C\u540D\u79F0">\u5267\u672C\u5185\u5BB9</${tag}>\uFF08\u6BCF\u96C6\u5267\u672C\u4E00\u5BF9\u6807\u7B7E\uFF09` : `<${tag}>${label}\u5185\u5BB9</${tag}>`;
+    const extractRe = new RegExp(`<${tag}(\\s[^>]*)?>[\\s\\S]*?</${tag}>`);
     try {
       const { text: text2 } = await utils_default.Ai.Text(key).invoke({
-        system: `\u4F60\u4E4B\u524D\u7684\u56DE\u590D\u5185\u5BB9\u5B8C\u6574\uFF0C\u4F46\u7F3A\u5C11\u5FC5\u9700\u7684XML\u6807\u7B7E\u683C\u5F0F\u3002\u8BF7\u628A\u8BE5\u5185\u5BB9\u539F\u6837\u5957\u4E0AXML\u6807\u7B7E\u8F93\u51FA\uFF0C\u4E0D\u8981\u589E\u5220\u6216\u6539\u5199\u4EFB\u4F55\u5185\u5BB9\uFF0C\u4E0D\u8981\u8F93\u51FA\u5176\u4ED6\u4EFB\u4F55\u6587\u5B57\u3002${isScript ? "name \u5C5E\u6027\u53D6\u5267\u672C\u6587\u4EF6\u5934\u9996\u884C\u6807\u9898\uFF08\u4E0D\u542B#\uFF09\u3002" : ""}\u8F93\u51FA\u683C\u5F0F\uFF1A
+        system: `\u4F60\u4E4B\u524D\u7684\u56DE\u590D\u5185\u5BB9\u5B8C\u6574\uFF0C\u4F46\u7F3A\u5C11\u5FC5\u9700\u7684XML\u6807\u7B7E\u683C\u5F0F\u3002\u8BF7\u628A\u8BE5\u5185\u5BB9\u539F\u6837\u5957\u4E0AXML\u6807\u7B7E\u8F93\u51FA\uFF0C\u4E0D\u8981\u589E\u5220\u6216\u6539\u5199\u4EFB\u4F55\u5185\u5BB9\uFF0C\u4E0D\u8981\u8F93\u51FA\u5176\u4ED6\u4EFB\u4F55\u6587\u5B57\u3002${isScript ? "\u6BCF\u96C6\u5267\u672C\u5404\u7528\u4E00\u5BF9\u6807\u7B7E\u5305\u88F9\uFF0Cname \u5C5E\u6027\u53D6\u8BE5\u96C6\u6587\u4EF6\u5934\u9996\u884C\u6807\u9898\uFF08\u4E0D\u542B#\uFF09\u3002" : ""}\u8F93\u51FA\u683C\u5F0F\uFF1A
 ${formatSpec}`,
         messages: [{ role: "user", content: `\u4EFB\u52A1\uFF1A${prompt}
 
@@ -258880,13 +258895,11 @@ ${formatSpec}`,
 ${fullResponse}` }]
       });
       const repaired = text2.trim();
-      const extracted = repaired.match(extractRe);
-      const content = isScript ? extracted?.[2] : extracted?.[1];
-      if (extracted && content && content.trim().length > 0) {
-        thinking.appendText(`\u683C\u5F0F\u8865\u5199\u6210\u529F\uFF0C${label}\u957F\u5EA6: ${content.trim().length}`);
+      if (extractRe.test(repaired)) {
+        thinking.appendText(`\u683C\u5F0F\u8865\u5199\u6210\u529F\uFF0C${label}\u957F\u5EA6: ${repaired.length}`);
         thinking.updateTitle(`${label}\u683C\u5F0F\u5DF2\u8865\u5199`);
         thinking.complete();
-        return isScript ? `<${tag}${extracted[1] ?? ""}>${content.trim()}</${tag}>` : content.trim();
+        return repaired;
       }
       thinking.appendText("\u683C\u5F0F\u8865\u5199\u672A\u80FD\u63D0\u53D6\u5230\u5185\u5BB9");
       thinking.updateTitle(`${label}\u683C\u5F0F\u8865\u5199\u5931\u8D25`);
@@ -258946,13 +258959,33 @@ ${fullResponse}` }]
           const repaired = await repairMissingTags(subMsg, key, workTag.label, workTag.tag, prompt, fullResponse);
           if (repaired) {
             if (workTag.field === "script") {
-              await persistScriptPlanDataFromResponse(resTool.data.projectId, repaired).catch(
-                (e) => console.error("[scriptAgent] \u8865\u5199\u5267\u672C\u843D\u5E93\u5931\u8D25:", utils_default.error(e).message)
-              );
+              const repairedPatch = await persistScriptPlanDataFromResponse(resTool.data.projectId, repaired).catch((e) => {
+                console.error("[scriptAgent] \u8865\u5199\u5267\u672C\u843D\u5E93\u5931\u8D25:", utils_default.error(e).message);
+                return null;
+              });
+              if (repairedPatch?.script?.length) {
+                const t = subMsg.thinking("\u5267\u672C\u5DF2\u8865\u5199\u843D\u5E93");
+                t.appendText(`\u5DF2\u901A\u8FC7\u683C\u5F0F\u8865\u5199\u4FDD\u5B58 ${repairedPatch.script.length} \u96C6\u5267\u672C\u3002`);
+                t.updateTitle("\u5267\u672C\u5DF2\u4FDD\u5B58\uFF08\u8865\u5199\uFF09");
+                t.complete();
+              } else {
+                const warn = subMsg.thinking("\u5267\u672C\u8865\u5199\u89E3\u6790\u5931\u8D25");
+                warn.appendText(
+                  `\u26A0\uFE0F \u8865\u5199\u4EA7\u7269\u4E2D\u672A\u89E3\u6790\u5230\u6709\u6548\u7684 scriptItem\uFF0C\u5185\u5BB9\u672A\u5199\u5165\u5267\u672C\u5E93\u3002\u5B8C\u6574\u5185\u5BB9\u5DF2\u5728\u5BF9\u8BDD\u6D41\u4E2D\uFF0C\u8BF7\u8BA9Agent\u91CD\u65B0\u8F93\u51FA\uFF08\u6216\u590D\u5236\u4FDD\u5B58\uFF09\u3002`
+                );
+                warn.updateTitle("\u5267\u672C\u672A\u4FDD\u5B58\uFF08\u8865\u5199\u89E3\u6790\u5931\u8D25\uFF09");
+                warn.complete();
+              }
             } else {
-              await mergeScriptPlanData(resTool.data.projectId, { [workTag.field]: repaired }).catch(
-                (e) => console.error("[scriptAgent] \u8865\u5199\u5185\u5BB9\u843D\u5E93\u5931\u8D25:", utils_default.error(e).message)
-              );
+              const tags = extractXmlTags(repaired, workTag.tag);
+              const content = tags.length ? tags[tags.length - 1].content : null;
+              if (content) {
+                await mergeScriptPlanData(resTool.data.projectId, { [workTag.field]: content }).catch(
+                  (e) => console.error("[scriptAgent] \u8865\u5199\u5185\u5BB9\u843D\u5E93\u5931\u8D25:", utils_default.error(e).message)
+                );
+              } else {
+                console.error("[scriptAgent] \u8865\u5199\u4EA7\u7269\u89E3\u6790\u4E0D\u5230\u6807\u7B7E\u5185\u5BB9:", repaired.slice(0, 200));
+              }
             }
           } else if (workTag.field === "script") {
             const warn = subMsg.thinking("\u5267\u672C\u683C\u5F0F\u8865\u5199\u5931\u8D25");
